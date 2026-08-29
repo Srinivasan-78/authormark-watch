@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.1twkPXUzqsuzxkn4xG711P
+# Fingerprint: AMK1.2YBFsxAqyhF63HmzCuUizG
 # Scan every repo this account owns and report any that is unmarked, has drifted,
 # or has had watermarks stripped. Runs on a schedule from authormark-watch.
 #
@@ -104,8 +104,6 @@ Add authorship watermarks
 Stamp source files with a keyed authorship header, watermark images with
 metadata plus an invisible pixel mark, and seal a hash manifest. CI verifies
 the marks survive every PR.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
   fi
 
