@@ -60,6 +60,11 @@ this repo alone.
 Until `WATCH_TOKEN` exists the scheduled run will fail at the clone step — that failure is the
 signal that step 2 is still outstanding.
 
+The status issue is filed in *this* repo, so it does not use that PAT at all: the workflow passes
+the built-in `GITHUB_TOKEN` as `ISSUE_TOKEN` and grants itself `issues: write`. A PAT scoped to the
+repos being scanned usually cannot see this one, and GitHub reports that as
+`Could not resolve to a Repository` rather than as a permission error.
+
 ## Opening fix PRs automatically
 
 Reporting is the default. To have the watcher fix what it finds:

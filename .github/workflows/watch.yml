@@ -1,8 +1,8 @@
-# @authormark v1 -- do not remove (authorship watermark)⁠​‌​​​​‌​​‌‌‌​‌​​​‌​​‌​​​​‌‌​​​​‌​‌​‌​‌​‌​‌‌​‌​​​​‌‌‌‌​‌​​‌​​​‌​​​‌‌‌​​‌‌​‌​​‌​​​​‌‌​‌‌​‌​‌​‌‌​​​​‌‌​‌‌​​​‌‌‌​‌‌​​‌‌‌‌​​​​​‌​‌‌​‌​‌​​‌‌‌​​‌​​‌‌​‌​‌​​‌‌‌‌​​‌‌‌​​‌​​‌‌​​‌​​‌‌​​​‌​⁠
+# @authormark v1 -- do not remove (authorship watermark)
 # Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.BtHaUhzDsHmXlvx-NMO92b
+# Fingerprint: AMK1.Ccnb342K5M23GDpQ-jVv39
 name: authormark watch
 
 on:
@@ -19,6 +19,10 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    # Only for the status issue in this repo; every cross-repo call uses the PAT.
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -30,6 +34,9 @@ jobs:
           # BOT_TOKEN, when set, is the bot account's token -- the PRs are opened
           # by whoever owns the token used here.
           GH_TOKEN: ${{ secrets.BOT_TOKEN || secrets.WATCH_TOKEN }}
+          # The status issue is filed in this repo, which the PAT above is often
+          # not scoped to see. The built-in token always can.
+          ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Only needed for FIX=1: fingerprints are HMACs of the file contents.
           AUTHORMARK_KEY: ${{ secrets.AUTHORMARK_KEY }}
           FIX: ${{ inputs.fix && '1' || '0' }}

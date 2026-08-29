@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.SzUYbzDQT91YmUFUT21HV2
+# Fingerprint: AMK1.D34HDtBJraZcl7rYvaeO9t
 # Scan every repo this account owns and report any that is unmarked, has drifted,
 # or has had watermarks stripped. Runs on a schedule from authormark-watch.
 #
@@ -38,6 +38,14 @@ if [ -n "${CI:-}" ] && [ -z "${GH_TOKEN:-}" ]; then
   exit 1
 fi
 
+# `gh repo clone` authenticates the clone but leaves no credentials behind, so a
+# later `git push` in CI has nothing to authenticate with and dies asking for a
+# username on stdin. Route git's github.com auth through gh, which reads GH_TOKEN.
+# The token never enters a URL or the git config, so it cannot leak into logs.
+if [ -n "${CI:-}" ] && [ -n "${GH_TOKEN:-}" ]; then
+  git config --global credential."https://github.com".helper '!gh auth git-credential'
+fi
+
 # Fingerprints are HMACs: without the signing key nothing can be stamped, so fail
 # up front rather than after cloning half the account.
 if [ "$FIX" = "1" ]; then
@@ -57,7 +65,9 @@ why() {
   local msg
   msg=$(grep -aE 'rejected|denied|refusing|not accessible|forbidden|fatal|error|HTTP [0-9]{3}' "$1" | head -1)
   [ -n "$msg" ] || msg=$(grep -av '^[[:space:]]*$' "$1" | tail -1)
-  printf '%s' "$msg" | tr -d '\r' | cut -c1-200
+  # These lines end up in a public issue, so never let a token through.
+  printf '%s' "$msg" | tr -d '\r' \
+    | sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/***/g' | cut -c1-200
 }
 
 # Apply the marks on a branch and open a PR. Runs inside an already-cloned repo.
@@ -220,20 +230,32 @@ cat "$WORK/report.md"
 # Keep exactly one issue open, updated in place, so this never spams.
 [ "${REPORT:-1}" = "1" ] || exit 0
 TITLE="authormark: authorship watermark status"
-existing=$(gh issue list --repo "$OWNER/authormark-watch" --state open \
+
+# The status issue lives in THIS repo, so the workflow's built-in GITHUB_TOKEN
+# can file it. The scan PAT usually cannot -- it is scoped to the repos being
+# checked, and GitHub answers "Could not resolve to a Repository" rather than
+# admitting the repo exists. Fall back to GH_TOKEN when ISSUE_TOKEN is unset,
+# which is the local case, where gh is already logged in.
+gh_issue() {
+  if [ -n "${ISSUE_TOKEN:-}" ]; then GH_TOKEN="$ISSUE_TOKEN" gh issue "$@"; else gh issue "$@"; fi
+}
+
+existing=$(gh_issue list --repo "$OWNER/authormark-watch" --state open \
   --search "$TITLE in:title" --json number --jq '.[0].number' 2>/dev/null)
 
 if [ "$problems" -gt 0 ]; then
   if [ -n "$existing" ]; then
-    gh issue edit "$existing" --repo "$OWNER/authormark-watch" --body-file "$WORK/report.md" >/dev/null
-    gh issue comment "$existing" --repo "$OWNER/authormark-watch" \
-      --body "Re-scanned: **$problems** repo(s) still need attention." >/dev/null
+    gh_issue edit "$existing" --repo "$OWNER/authormark-watch" --body-file "$WORK/report.md" >/dev/null 2>"$WORK/issue.err" \
+      || echo "::warning::could not update issue #$existing: $(why "$WORK/issue.err")"
+    gh_issue comment "$existing" --repo "$OWNER/authormark-watch" \
+      --body "Re-scanned: **$problems** repo(s) still need attention." >/dev/null 2>&1
   else
-    gh issue create --repo "$OWNER/authormark-watch" --title "$TITLE" --body-file "$WORK/report.md" >/dev/null
+    gh_issue create --repo "$OWNER/authormark-watch" --title "$TITLE" --body-file "$WORK/report.md" >/dev/null 2>"$WORK/issue.err" \
+      || echo "::warning::could not file the status issue: $(why "$WORK/issue.err") -- the workflow needs 'issues: write' so GITHUB_TOKEN can post it"
   fi
   echo "::error::$problems repo(s) have missing or stripped watermarks"
   exit 1
 elif [ -n "$existing" ]; then
-  gh issue comment "$existing" --repo "$OWNER/authormark-watch" --body "All repos clean again. Closing." >/dev/null
-  gh issue close "$existing" --repo "$OWNER/authormark-watch" >/dev/null
+  gh_issue comment "$existing" --repo "$OWNER/authormark-watch" --body "All repos clean again. Closing." >/dev/null 2>&1
+  gh_issue close "$existing" --repo "$OWNER/authormark-watch" >/dev/null 2>&1
 fi
