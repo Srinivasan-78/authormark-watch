@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.Ccnb342K5M23GDpQ-jVv39
+# Fingerprint: AMK1.zzYpueq0qwENuefBcq7RwJ
 name: authormark watch
 
 on:
@@ -16,18 +16,25 @@ on:
         type: boolean
         default: false
 
+# A manual run and the nightly cron overlapping would open the same fix PR twice.
+concurrency:
+  group: authormark-watch
+  cancel-in-progress: false
+
 jobs:
   scan:
     runs-on: ubuntu-latest
+    # A hung clone should not sit on a runner for the default six hours.
+    timeout-minutes: 20
     # Only for the status issue in this repo; every cross-repo call uses the PAT.
     permissions:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '24'
       - name: Scan every repo for intact authorship watermarks
         env:
           # A PAT, not GITHUB_TOKEN: the built-in token can only see this repo.

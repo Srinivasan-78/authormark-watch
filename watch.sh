@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.D34HDtBJraZcl7rYvaeO9t
+# Fingerprint: AMK1.1twkPXUzqsuzxkn4xG711P
 # Scan every repo this account owns and report any that is unmarked, has drifted,
 # or has had watermarks stripped. Runs on a schedule from authormark-watch.
 #
@@ -63,6 +63,9 @@ fi
 # otherwise.
 why() {
   local msg
+  # A step can fail without writing a word to stderr; say so rather than letting
+  # grep's own "No such file" become the reported reason.
+  [ -s "$1" ] || { printf 'no error output'; return 0; }
   msg=$(grep -aE 'rejected|denied|refusing|not accessible|forbidden|fatal|error|HTTP [0-9]{3}' "$1" | head -1)
   [ -n "$msg" ] || msg=$(grep -av '^[[:space:]]*$' "$1" | tail -1)
   # These lines end up in a public issue, so never let a token through.
@@ -146,6 +149,19 @@ try_fix() {
   fixfailed+=("$1|$reason")
 }
 
+# Read the list up front. Piped in through `done < <(...)`, a failed `gh repo
+# list` is invisible: the loop simply never runs and the job reports "Scanned 0
+# repos" as a success -- the exact blind spot this monitor exists to close.
+repos=$(gh repo list "$OWNER" --limit 200 --no-archived --json name,isFork \
+  --jq '.[] | select(.isFork | not) | .name' 2>"$WORK/list.err") || {
+  echo "::error::could not list repos for $OWNER: $(why "$WORK/list.err")"
+  exit 1
+}
+if [ -z "$repos" ]; then
+  echo "::error::no repos returned for $OWNER -- the token is probably not scoped to read them."
+  exit 1
+fi
+
 while IFS= read -r name; do
   [ -z "$name" ] && continue
   case "$SKIP" in *" $name "*) continue ;; esac
@@ -169,7 +185,7 @@ while IFS= read -r name; do
     drifted+=("$name ($n file(s))")
     [ "$FIX" = "1" ] && try_fix "$name"
   fi
-done < <(gh repo list "$OWNER" --limit 200 --no-archived --json name,isFork --jq '.[] | select(.isFork | not) | .name')
+done <<< "$repos"
 
 total=$(( ${#unmarked[@]} + ${#drifted[@]} + ${#clean[@]} + ${#failed[@]} ))
 problems=$(( ${#unmarked[@]} + ${#drifted[@]} ))

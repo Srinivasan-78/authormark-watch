@@ -60,6 +60,17 @@ this repo alone.
 Until `WATCH_TOKEN` exists the scheduled run will fail at the clone step — that failure is the
 signal that step 2 is still outstanding.
 
+Two things that make the monitor go quietly blind, so check both:
+
+- **"All repositories", not a hand-picked list.** A token scoped to selected repos makes the ones
+  it cannot see simply absent from the scan — they are not reported as failures, because the
+  listing never mentions them. Compare the repo count in the run log against
+  `gh repo list Srinivasan-78 --no-archived --json name --jq 'length'`; if CI's number is lower,
+  the token is missing repos.
+- **GitHub disables `schedule:` after 60 days without a push to the repo.** A silent monitor and a
+  clean account look identical. If the daily run stops appearing, re-enable it with
+  `gh workflow enable watch.yml --repo Srinivasan-78/authormark-watch`.
+
 The status issue is filed in *this* repo, so it does not use that PAT at all: the workflow passes
 the built-in `GITHUB_TOKEN` as `ISSUE_TOKEN` and grants itself `issues: write`. A PAT scoped to the
 repos being scanned usually cannot see this one, and GitHub reports that as
