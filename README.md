@@ -1,9 +1,9 @@
 <!--
-  @authormark v1 -- do not remove (authorship watermark)⁠​‌​‌​​​​​‌​‌​‌‌‌​‌‌‌​​‌​​‌​​​​‌‌​​‌‌​‌‌‌​‌​‌​​​‌​‌‌​‌‌‌‌​​‌‌​​‌‌​‌​​​‌‌​​‌​​‌​​‌​‌‌​​‌​​​‌‌‌​​​‌​‌‌‌​​‌​​​‌‌​​​‌​‌​‌‌​​​​‌​​​​‌​​‌​‌​‌‌‌​‌​​‌​‌​​‌‌​‌‌​‌​​‌‌​​‌‌​​‌‌​​​‌​‌​‌‌​​‌⁠
+  @authormark v1 -- do not remove (authorship watermark)⁠​‌‌​​‌‌​​‌‌‌​‌​​​‌​‌​‌‌‌​‌‌​​​‌‌​‌​‌​‌​​​‌​‌‌​‌​​‌​​‌‌​​​‌​‌​​​‌​​‌‌​​‌​​‌​‌​‌‌‌​‌‌​‌‌‌​​‌‌​‌​‌‌​‌‌‌​‌‌‌​‌​‌​‌​‌​‌​​​​​‌​‌​​​‌‌‌​‌‌​‌‌​​​‌​‌‌​​​​​‌​‌‌​‌​‌​‌‌​​​​‌​‌‌​​​​​‌‌​‌​​⁠
   Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
   Author: https://github.com/Srinivasan-78
   SPDX-License-Identifier: MIT
-  Fingerprint: AMK1.PWrC7Qo3FIdqr1XBWJm31Y
+  Fingerprint: AMK1.ftWcTZLQ2WnkwUAGlX-XX4
 -->
 # authormark-watch
 
@@ -16,6 +16,11 @@ unstamped). Findings go into a single GitHub issue that is updated in place and 
 automatically once everything is clean again — so it never spams.
 
 It also catches **brand-new repos** you forgot to run `authormark setup` on.
+
+With `FIX=1` it does more than report: for every repo that is unmarked or drifted it applies the
+marks on an `authormark` branch, commits as a bot account, pushes, and opens a pull request. One PR
+per repo — a later run pushes to the same branch and reuses the open PR rather than opening a second
+one.
 
 ## Why it uses its own checker
 
@@ -49,19 +54,69 @@ this repo alone.
 
    ```sh
    gh workflow run watch.yml --repo Srinivasan-78/authormark-watch
+   gh workflow run watch.yml --repo Srinivasan-78/authormark-watch -f fix=true   # and fix what it finds
    ```
 
 Until `WATCH_TOKEN` exists the scheduled run will fail at the clone step — that failure is the
 signal that step 2 is still outstanding.
+
+## Opening fix PRs automatically
+
+Reporting is the default. To have the watcher fix what it finds:
+
+```sh
+FIX=1 ./watch.sh
+```
+
+For each unmarked or drifted repo it checks out a branch named `authormark`, runs `authormark
+setup` (config, vendored tool, CI workflow, agent rules, LICENSE, stamped sources, watermarked
+images, sealed manifest), commits, pushes with `--force-with-lease`, and opens a PR. Repos that are
+already clean are untouched, and nothing is ever pushed to a default branch. The PR links appear in
+the status issue alongside everything else.
+
+### Who the PR comes from
+
+The pull request is opened by whichever account owns the token in `GH_TOKEN`, so to have it come
+from a bot rather than from you, give the workflow a bot account's token as the `BOT_TOKEN` secret:
+
+```sh
+gh secret set BOT_TOKEN --repo Srinivasan-78/authormark-watch
+```
+
+That token needs **Contents: read and write** and **Pull requests: read and write** on the repos it
+will fix, plus **Metadata: read-only**. When `BOT_TOKEN` is absent the workflow falls back to
+`WATCH_TOKEN`, which is read-only, and every fix attempt will be reported as failed.
+
+The commits themselves are attributed to `github-actions[bot]`. Override with the `BOT_NAME` and
+`BOT_EMAIL` environment variables if your bot account is a different one.
+
+### The signing key
+
+Fingerprints are HMACs, so nothing can be stamped without `~/.authormark.key`. Locally that file is
+already there and `FIX=1` just works. In CI the job reads the key from an `AUTHORMARK_KEY` secret
+and writes it to that path.
+
+Think carefully before adding that secret. The key is the thing that makes a fingerprint provably
+yours, and a copy of it in GitHub Actions is a copy you no longer fully control — anyone who can
+push a workflow to this repository, or who gains admin access to it, can print it. Running `FIX=1`
+from your own machine on a schedule keeps the key off GitHub entirely, and is the safer default. If
+you do put it in CI, restrict who can edit workflows in this repo and plan to rotate the key if that
+ever changes — though note that rotating invalidates every fingerprint already issued, so the
+practical answer is usually to keep the key local.
+
+Without the key, `FIX=1` exits immediately with an explanation rather than opening empty PRs.
 
 ## Running it locally
 
 ```sh
 ./watch.sh              # scan and open/update the issue
 REPORT=0 ./watch.sh     # scan and print the report only
+FIX=1 ./watch.sh        # scan, then open a fix PR per problem repo
 ```
 
-Locally it uses your `gh auth` session, so no token setup is needed.
+Locally it uses your `gh auth` session, so no token setup is needed — which also means locally the
+PRs come from *your* account, not the bot's. Set `GH_TOKEN` to the bot's token to get bot-authored
+PRs from a local run too.
 
 ## Excluded repos
 

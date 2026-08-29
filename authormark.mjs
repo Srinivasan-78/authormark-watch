@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /*!
- * @authormark v1 -- do not remove (authorship watermark)⁠​‌​‌​​​​​‌​​​‌​​​‌‌‌​​​​​‌‌‌‌​​‌​​‌‌​‌‌​​‌‌‌​‌‌​​‌​​​​​‌​​‌‌​‌​‌​​‌‌​‌‌​​​‌‌​‌​​​‌‌​​​​‌​‌​‌​​​​​‌​​‌‌‌​​‌‌​‌‌​‌​‌​​​‌​​​‌‌‌​​​​​‌‌‌‌​​​​‌‌‌​​‌‌​‌​‌‌​​​​‌‌‌​‌‌‌​‌​‌​‌‌‌​‌‌​‌​‌​⁠
+ * @authormark v1 -- do not remove (authorship watermark)⁠​‌‌​‌​​‌​‌‌‌​‌​‌​‌​​‌​​​​‌​‌​​​​​‌​‌​‌‌‌​‌‌​​​​‌​‌​​​‌​‌​​‌‌​‌​‌​​‌‌​‌​‌​​‌‌‌​​​​‌​​‌‌‌‌​‌‌​​​‌‌​‌‌‌​​​​​‌‌‌‌​‌​​‌​​‌​‌​​‌‌‌​‌​​​‌​‌​​​​​‌​​​‌‌​​‌‌‌​‌​‌​‌‌​‌​‌​​‌‌​​‌‌​​​‌‌​​​​⁠
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.PDpy6vA564aPNmDpxsXwWj
+ * Fingerprint: AMK1.iuHPWaE558OcpzJtPFujf0
  */
 // authormark -- layered authorship watermarking for source code and images.
 // Zero dependencies. Node >= 18.
@@ -112,6 +112,12 @@ function renderHeader(cfg, fp, style, zw) {
   return [style.open, ...lines.map(l => style.line + l), style.close].join('\n') + '\n';
 }
 
+// A header we wrote is at most 5 lines plus its delimiters; never scan further.
+// Without this bound a sentinel line whose `Fingerprint:` was deleted would make
+// the search run to EOF and stamp would then overwrite the whole file with a header.
+const HEADER_MAX_LINES = 8;
+const HEADER_FIELD = /(Copyright \(c\)|Author:|SPDX-License-Identifier:|Fingerprint: )/;
+
 // Returns {header, body} -- header is '' when the file is unstamped.
 function splitHeader(text) {
   const lines = text.split('\n');
@@ -119,8 +125,21 @@ function splitHeader(text) {
   if (i === -1) return { header: '', body: text, at: -1 };
   let start = i, end = i;
   if (i > 0 && /^\s*(\/\*!?|<!--)\s*$/.test(lines[i - 1])) start = i - 1;
-  while (end < lines.length && !lines[end].includes(FP_LABEL)) end++;
-  if (end < lines.length - 1 && /^\s*(\*\/|-->)\s*$/.test(lines[end + 1])) end++;
+  const limit = Math.min(lines.length, i + HEADER_MAX_LINES);
+  while (end < limit && !lines[end].includes(FP_LABEL)) end++;
+  if (end >= limit) {
+    // No fingerprint in range -- fall back to the block's closing delimiter so a
+    // hand-mangled header is still replaced rather than duplicated.
+    let close = i;
+    while (close < limit && !/^\s*(\*\/|-->)\s*$/.test(lines[close])) close++;
+    if (close < limit) end = close;
+    else {
+      // Prefix comment styles have no delimiter: take only the lines that are
+      // recognisably header fields, so a neighbouring comment is not swallowed.
+      end = i;
+      while (end + 1 < limit && HEADER_FIELD.test(lines[end + 1])) end++;
+    }
+  } else if (end < lines.length - 1 && /^\s*(\*\/|-->)\s*$/.test(lines[end + 1])) end++;
   return { header: lines.slice(start, end + 1).join('\n'), body: lines.slice(0, start).concat(lines.slice(end + 1)).join('\n'), at: start };
 }
 
@@ -128,12 +147,15 @@ function splitHeader(text) {
 // YAML front-matter block (Jekyll pages and issue templates break if displaced).
 function insertIndex(text) {
   const lines = text.split('\n');
-  if (lines[0] === '---') {
-    const close = lines.findIndex((l, i) => i > 0 && (l === '---' || l === '...'));
+  // CRLF files keep a trailing \r on every line, so compare without it -- but keep
+  // using the untrimmed length, since that \r is a real byte in the offset.
+  const bare = l => (l || '').replace(/\r$/, '');
+  if (bare(lines[0]) === '---') {
+    const close = lines.findIndex((l, i) => i > 0 && (bare(l) === '---' || bare(l) === '...'));
     if (close > 0) return lines.slice(0, close + 1).join('\n').length + 1;
   }
-  if (lines[0]?.startsWith('#!')) return lines[0].length + 1;
-  if (/^\s*(<\?xml|<!doctype)/i.test(lines[0] || '')) return lines[0].length + 1;
+  if (bare(lines[0]).startsWith('#!')) return lines[0].length + 1;
+  if (/^\s*(<\?xml|<!doctype)/i.test(bare(lines[0]))) return lines[0].length + 1;
   return 0;
 }
 
@@ -162,11 +184,15 @@ function zwDecode(text) {
 // ---------------------------------------------------------------- file walking
 
 function walk(target, exts, acc = []) {
-  const st = fs.statSync(target);
+  // A dangling symlink or a race with a deleted file must not abort the whole run.
+  let st;
+  try { st = fs.statSync(target); } catch { return acc; }
   if (st.isFile()) { if (exts.includes(path.extname(target)) || NAMED_FILES.has(path.basename(target))) acc.push(target); return acc; }
+  if (!st.isDirectory()) return acc;
   for (const e of fs.readdirSync(target, { withFileTypes: true })) {
     if (e.name.startsWith('.') && e.name !== '.github') continue;
     if (SKIP_DIRS.has(e.name)) continue;
+    if (e.isSymbolicLink()) continue; // a linked directory can loop back on itself
     walk(path.join(target, e.name), exts, acc);
   }
   return acc;
@@ -248,9 +274,13 @@ function cmdCheck(args) {
   const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
   let files;
   if (args.includes('--staged')) {
+    // git prints paths from the repo root, which is not necessarily CWD.
+    const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     files = execFileSync('git', ['diff', '--cached', '--name-only', '--diff-filter=ACM'], { encoding: 'utf8' })
       .split('\n')
-      .filter(f => f && (exts.includes(path.extname(f)) || NAMED_FILES.has(path.basename(f))) && !ignored(f, cfg) && fs.existsSync(f));
+      .filter(f => f && (exts.includes(path.extname(f)) || NAMED_FILES.has(path.basename(f))))
+      .map(f => path.relative(CWD, path.join(root, f)))
+      .filter(f => !ignored(f, cfg) && fs.existsSync(f));
   } else {
     files = collect(positional(args), exts, cfg);
   }
@@ -355,12 +385,14 @@ function crc32(buf) {
 }
 
 function pngChunks(buf) {
-  if (buf.readUInt32BE(0) !== 0x89504e47) die('not a PNG');
+  if (buf.length < 8 || buf.readUInt32BE(0) !== 0x89504e47) die('not a PNG');
   const out = [];
   let p = 8;
-  while (p < buf.length) {
+  // p + 8 so a truncated tail stops the walk instead of throwing a range error.
+  while (p + 8 <= buf.length) {
     const len = buf.readUInt32BE(p);
     const type = buf.toString('ascii', p + 4, p + 8);
+    if (p + 12 + len > buf.length) die('truncated PNG chunk');
     out.push({ type, data: buf.subarray(p + 8, p + 8 + len) });
     p += 12 + len;
   }
@@ -420,7 +452,8 @@ function unpackBits(row, width, channels, depth) {
 
 function decodePng(buf) {
   const chunks = pngChunks(buf);
-  const ihdr = chunks.find(c => c.type === 'IHDR').data;
+  const ihdr = chunks.find(c => c.type === 'IHDR')?.data;
+  if (!ihdr || ihdr.length < 13) die('PNG has no usable IHDR');
   const width = ihdr.readUInt32BE(0), height = ihdr.readUInt32BE(4);
   const depth = ihdr[8], colorType = ihdr[9], interlace = ihdr[12];
   if (interlace) die('interlaced PNG not supported -- re-save without interlacing');
@@ -437,6 +470,7 @@ function decodePng(buf) {
 
   const plte = chunks.find(c => c.type === 'PLTE')?.data;
   const trns = chunks.find(c => c.type === 'tRNS')?.data;
+  if (colorType === 3 && !plte) die('palette PNG has no PLTE chunk');
   const rgba = Buffer.alloc(width * height * 4, 255);
   const grayMax = (1 << depth) - 1;
 
@@ -659,6 +693,7 @@ function cmdImage(args) {
   const files = positional(args);
   if (!files.length) die('usage: authormark image <file.png|file.jpg> [-o out] [--visible "text"] [--tile]');
   const outFlag = flag(args, '-o') || flag(args, '--out');
+  if (outFlag && files.length > 1) die('-o takes a single input file -- use --inplace for a batch');
   const visible = args.includes('--visible') ? (flag(args, '--visible') || `(c) ${cfg.year} ${cfg.author}`) : null;
   const tile = args.includes('--tile');
   const opacity = Number(flag(args, '--opacity') ?? 0.55);
@@ -728,10 +763,13 @@ function scanPng(buf, key) {
 
 function scanJpeg(buf) {
   let p = 2, found = 0;
-  while (p < buf.length - 1 && buf[p] === 0xff) {
+  while (p + 3 < buf.length && buf[p] === 0xff) {
     const m = buf[p + 1];
     if (m === 0xda || m === 0xd9) break;
+    if (m === 0xff) { p++; continue; }                       // fill byte
+    if (m === 0x01 || (m >= 0xd0 && m <= 0xd7)) { p += 2; continue; } // no payload
     const len = buf.readUInt16BE(p + 2);
+    if (len < 2 || p + 2 + len > buf.length) break;
     const seg = buf.subarray(p + 4, p + 2 + len);
     if (m === 0xfe) { log(`  COM: ${seg.toString('latin1').trim()}`); found++; }
     if (m === 0xe1) {
@@ -824,10 +862,13 @@ SOFTWARE.
 function findImages(dir = '.', acc = []) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
+    if (e.isSymbolicLink()) continue;
     if (e.isDirectory()) {
       if (e.name === '.git' || SKIP_DIRS.has(e.name)) continue;
       findImages(p, acc);
-    } else if (/\.(png|jpe?g)$/i.test(e.name) && fs.statSync(p).size <= 5 * 1024 * 1024) acc.push(p);
+    } else if (/\.(png|jpe?g)$/i.test(e.name)) {
+      try { if (fs.statSync(p).size <= 5 * 1024 * 1024) acc.push(p); } catch { /* vanished */ }
+    }
   }
   return acc;
 }
@@ -872,7 +913,8 @@ function cmdSetup(args) {
     steps.push('LICENSE (MIT)');
   }
 
-  cmdStamp(['.', '--zw', ...(args.includes('--ext') ? ['--ext', flag(args, '--ext')] : [])]);
+  const extArg = flag(args, '--ext');
+  cmdStamp(['.', '--zw', ...(extArg ? ['--ext', extArg] : [])]);
 
   if (!args.includes('--no-images')) {
     let ok = 0, bad = 0, already = 0;
@@ -900,11 +942,14 @@ function cmdSetup(args) {
 
 // ---------------------------------------------------------------- utils + main
 
+// undefined when the flag is absent OR carries no value, so every `?? default`
+// and `|| default` downstream falls back instead of seeing an empty string
+// (Number('') is 0 -- that silently made --opacity/--scale zero).
 function flag(args, name) {
   const i = args.indexOf(name);
   if (i === -1) return undefined;
   const v = args[i + 1];
-  return v && !v.startsWith('-') ? v : '';
+  return v && !v.startsWith('-') ? v : undefined;
 }
 function positional(args) {
   const out = [];

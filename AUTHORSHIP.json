@@ -3,15 +3,15 @@
   "author": "Srinivasan Vijayaraghavan",
   "email": "srinivasan.shyam2000@gmail.com",
   "github": "https://github.com/Srinivasan-78",
-  "sealedAt": "2026-08-29T13:44:41.106Z",
+  "sealedAt": "2026-08-29T16:26:48.690Z",
   "fileCount": 6,
-  "digest": "49372826de014ac291b3774c48aff9149bbd554e2187b0a71dea185ea34a5685",
-  "proof": "74ef7b127697c6fea0641cf72ecb85c9bc60a377ec4884478d72f99d9eab83fb",
+  "digest": "3af4646fef94e8993cef89b4c0c70fc821bbcea5e96c0750cfd91654cd481f48",
+  "proof": "d30481f65a647cd3b4d029ff2b6d04acdd66d410fee35a7ae5cdfc44c490ab40",
   "files": [
     {
       "path": ".github/workflows/watch.yml",
-      "sha256": "a580b17ee44588d9c726cdc0a6d9daba4a63887d0cb3e645809cfd32857167ba",
-      "bytes": 1354
+      "sha256": "1bf22d0ca46fc22dd285a739813ced3bf0b3e0cbffea192c95a545f93e14817d",
+      "bytes": 1836
     },
     {
       "path": "AGENTS.md",
@@ -25,18 +25,18 @@
     },
     {
       "path": "README.md",
-      "sha256": "bfcb2556e7e8782c5222ef8f8ac4fc60214dc29a283b384ea5b5d53442e623ae",
-      "bytes": 3225
+      "sha256": "88900d2f397489ad26c289b4b3244796c8a95a9b307e7dd7f515fad7b7594901",
+      "bytes": 6161
     },
     {
       "path": "authormark.mjs",
-      "sha256": "f8523fe82b186348b07c60596061618ba96eb4bcac8686a02998a07072e53e21",
-      "bytes": 44687
+      "sha256": "cbc8ce22ff8726b4f84de869efd91b51a965f0ad4045ac297ad0f6ef80a13721",
+      "bytes": 47349
     },
     {
       "path": "watch.sh",
-      "sha256": "dabdf7454a583426b10dcb299992f1d2b60904a6a63e19acb962281943e2b272",
-      "bytes": 4498
+      "sha256": "1bb52b4287f214385a05186f7663dcb1a1a3258ec3d4450e7e84ba2a15d32c3a",
+      "bytes": 9881
     }
   ]
 }
