@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# @authormark v1 -- do not remove (authorship watermark)⁠​‌​‌​‌‌​​‌​​‌‌‌​​‌​​‌​‌‌​‌‌‌‌​​​​‌‌‌​‌‌‌​‌‌​​​‌‌​‌‌​‌​​​​​‌‌‌​​‌​‌‌​‌​‌‌​‌‌​​‌​​​​‌‌​‌‌​​‌​‌​​‌​​‌​​‌​​‌​‌​‌​​‌​​‌‌​‌​‌‌​‌‌​​‌​​​‌​​‌​‌​​‌​‌‌​​‌​‌‌​‌​​​​‌​​​​‌​​​‌‌‌​​‌​‌​​​‌‌​⁠
+# @authormark v1 -- do not remove (authorship watermark)
 # Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.VNKxwch9kd6RIRkdJYhB9F
+# Fingerprint: AMK1.3TvUT594Rz5tEvF_ZpGfZ0
 # Scan every repo this account owns and report any that is unmarked, has drifted,
 # or has had watermarks stripped. Runs on a schedule from authormark-watch.
 #
@@ -18,6 +18,13 @@ SKIP=" WixTemplate Ubisoft_spool Simple-Actions Brainrot_Study authormark-watch 
 
 AM="$(dirname "$(readlink -f "$0")")/authormark.mjs"
 [ -f "$AM" ] || { echo "authormark.mjs not found at $AM" >&2; exit 1; }
+
+# In CI the built-in GITHUB_TOKEN cannot see other repos, so a PAT is required.
+# Fail with the actual reason rather than a confusing clone error.
+if [ -n "${CI:-}" ] && [ -z "${GH_TOKEN:-}" ]; then
+  echo "::error::WATCH_TOKEN secret is not set -- this job cannot read your other repos yet. See README steps 1-2."
+  exit 1
+fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

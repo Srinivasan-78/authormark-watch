@@ -3,16 +3,11 @@
   "author": "Srinivasan Vijayaraghavan",
   "email": "srinivasan.shyam2000@gmail.com",
   "github": "https://github.com/Srinivasan-78",
-  "sealedAt": "2026-08-29T13:42:58.649Z",
-  "fileCount": 7,
-  "digest": "d67acd9d43ccc28a40192637b64be4cf328ab3fb19c0b0b950092eb9d27902ea",
-  "proof": "c768ac496c832c04b330184450750823a0536e75b2e9599da9b09709af110e24",
+  "sealedAt": "2026-08-29T13:44:41.106Z",
+  "fileCount": 6,
+  "digest": "49372826de014ac291b3774c48aff9149bbd554e2187b0a71dea185ea34a5685",
+  "proof": "74ef7b127697c6fea0641cf72ecb85c9bc60a377ec4884478d72f99d9eab83fb",
   "files": [
-    {
-      "path": ".github/workflows/authormark.yml",
-      "sha256": "b5cab2b0d7b18cd416758ec39f9677144704f615095f279d00e6f47ed2164e11",
-      "bytes": 1138
-    },
     {
       "path": ".github/workflows/watch.yml",
       "sha256": "a580b17ee44588d9c726cdc0a6d9daba4a63887d0cb3e645809cfd32857167ba",
@@ -40,8 +35,8 @@
     },
     {
       "path": "watch.sh",
-      "sha256": "ff17565ab5d6c35980d201b69225b1bb80a9a980b15b14bd89daacfe74f8b789",
-      "bytes": 4704
+      "sha256": "dabdf7454a583426b10dcb299992f1d2b60904a6a63e19acb962281943e2b272",
+      "bytes": 4498
     }
   ]
 }
