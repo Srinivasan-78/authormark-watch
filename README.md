@@ -83,8 +83,10 @@ from a bot rather than from you, give the workflow a bot account's token as the 
 gh secret set BOT_TOKEN --repo Srinivasan-78/authormark-watch
 ```
 
-That token needs **Contents: read and write** and **Pull requests: read and write** on the repos it
-will fix, plus **Metadata: read-only**. When `BOT_TOKEN` is absent the workflow falls back to
+That token needs **Contents: read and write**, **Pull requests: read and write**, and **Workflows:
+read and write** on the repos it will fix, plus **Metadata: read-only**. Workflows permission is
+required because `authormark setup` adds `.github/workflows/authormark.yml` and stamps any workflow
+files already there; without it the push is rejected and the fix is reported as failed. When `BOT_TOKEN` is absent the workflow falls back to
 `WATCH_TOKEN`, which is read-only, and every fix attempt will be reported as failed.
 
 The commits themselves are attributed to `github-actions[bot]`. Override with the `BOT_NAME` and

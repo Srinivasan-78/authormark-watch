@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# @authormark v1 -- do not remove (authorship watermark)⁠​‌‌​‌​‌‌​‌​‌​​‌‌​​‌‌​​‌​​​‌​‌‌​‌​‌‌​‌​​​​‌‌‌‌​‌​​‌‌​‌‌​‌​‌​‌‌‌‌‌​‌​‌​‌‌​​‌‌​​​‌​​​‌‌​​​​​‌‌‌​‌‌​​‌​‌​‌‌‌​‌​‌​‌‌​​‌​​‌‌‌​​‌‌‌​​​‌​‌‌‌​‌‌‌​‌‌‌​​​​​​‌‌​​‌‌​​‌‌​‌‌​​‌‌​​‌​‌​‌‌‌‌​​​⁠
+# @authormark v1 -- do not remove (authorship watermark)
 # Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.kS2-hzm_Vb0vWVNqwp36ex
+# Fingerprint: AMK1.SzUYbzDQT91YmUFUT21HV2
 # Scan every repo this account owns and report any that is unmarked, has drifted,
 # or has had watermarks stripped. Runs on a schedule from authormark-watch.
 #
@@ -50,24 +50,35 @@ if [ "$FIX" = "1" ]; then
   fi
 fi
 
+# Squeeze a captured stderr file down to the one line worth reporting, so a fix
+# that fails says why -- a rejected workflow file and a missing token look alike
+# otherwise.
+why() {
+  local msg
+  msg=$(grep -aE 'rejected|denied|refusing|not accessible|forbidden|fatal|error|HTTP [0-9]{3}' "$1" | head -1)
+  [ -n "$msg" ] || msg=$(grep -av '^[[:space:]]*$' "$1" | tail -1)
+  printf '%s' "$msg" | tr -d '\r' | cut -c1-200
+}
+
 # Apply the marks on a branch and open a PR. Runs inside an already-cloned repo.
-# Echoes the PR url on success; the caller decides how to report it.
+# Echoes the PR url on success and the reason on stderr on failure; the caller
+# decides how to report either.
 fix_repo() {
-  local repo="$1" url existing
+  local repo="$1" url existing err="$WORK/step.err"
   # No commit to branch from means an empty repo, or a clone that never checked
   # anything out. Branching there would commit a tree that DELETES every file.
-  git rev-parse --verify -q HEAD >/dev/null || return 1
+  git rev-parse --verify -q HEAD >/dev/null || { echo "empty repo -- no commit to branch from" >&2; return 1; }
   git fetch -q --unshallow origin 2>/dev/null || git fetch -q origin 2>/dev/null || true
-  git checkout -q -B "$BRANCH" || return 1
+  git checkout -q -B "$BRANCH" 2>"$err" || { echo "checkout failed: $(why "$err")" >&2; return 1; }
 
   # Same hazard from the other direction: a branch point with no files is never
   # something we should be opening a PR against.
-  [ -n "$(git ls-files)" ] || return 1
+  [ -n "$(git ls-files)" ] || { echo "no files at the branch point" >&2; return 1; }
 
   # setup is idempotent: it tops up config, CI, agent rules, LICENSE, stamps every
   # source file and image, and seals the manifest.
   node "$AM" setup --author "$AUTHOR" --email "$EMAIL" --github "$GHURL" \
-    --license MIT --no-hook >/dev/null 2>&1 || return 1
+    --license MIT --no-hook >/dev/null 2>"$err" || { echo "authormark setup failed: $(why "$err")" >&2; return 1; }
 
   # Never commit bytecode a local tool run may have produced.
   git status --porcelain | awk '/^\?\?/{print $2}' | grep -E '__pycache__|\.pyc$' | xargs -r rm -rf
@@ -85,7 +96,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
   fi
 
-  git push -q -u origin "$BRANCH" --force-with-lease 2>/dev/null || return 1
+  git push -q -u origin "$BRANCH" --force-with-lease 2>"$err" || { echo "push rejected: $(why "$err")" >&2; return 1; }
 
   # One PR per repo, updated by later pushes -- never a second one.
   existing=$(gh pr list --repo "$OWNER/$repo" --head "$BRANCH" --state open \
@@ -107,8 +118,8 @@ The tool is vendored at `.authormark/authormark.mjs` (zero dependencies, Node �
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 BODY
-)" 2>/dev/null | grep -oE 'https://github.com/\S+' | head -1)
-  [ -n "$url" ] || return 1
+)" 2>"$err" | grep -oE 'https://github.com/\S+' | head -1)
+  [ -n "$url" ] || { echo "pr create failed: $(why "$err")" >&2; return 1; }
   printf '%s' "$url"
 }
 
@@ -119,9 +130,10 @@ unmarked=(); drifted=(); clean=(); failed=(); fixed=(); fixfailed=()
 
 # $1 repo. Only called in FIX mode, with cwd inside that repo's clone.
 try_fix() {
-  local url
-  url=$(fix_repo "$1") && [ -n "$url" ] && { fixed+=("$1 — $url"); return 0; }
-  fixfailed+=("$1")
+  local url reason err="$WORK/fix.err"
+  url=$(fix_repo "$1" 2>"$err") && [ -n "$url" ] && { fixed+=("$1 — $url"); return 0; }
+  reason=$(grep -av '^[[:space:]]*$' "$err" | tail -1)
+  fixfailed+=("$1|$reason")
 }
 
 while IFS= read -r name; do
@@ -182,8 +194,11 @@ problems=$(( ${#unmarked[@]} + ${#drifted[@]} ))
   fi
   if [ ${#fixfailed[@]} -gt 0 ]; then
     echo "### ❌ Could not open a fix PR"
-    echo "The token needs **Contents: read and write** and **Pull requests: read and write** on these."
-    for r in "${fixfailed[@]}"; do echo "- \`$r\`"; done
+    echo "The token needs **Contents: read and write**, **Pull requests: read and write**, and **Workflows: read and write** on these (setup adds and stamps files under \`.github/workflows/\`)."
+    for r in "${fixfailed[@]}"; do
+      reason="${r#*|}"
+      echo "- \`${r%%|*}\`${reason:+ — $reason}"
+    done
     echo
   fi
   if [ ${#failed[@]} -gt 0 ]; then
