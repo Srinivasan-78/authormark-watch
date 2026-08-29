@@ -1,0 +1,47 @@
+{
+  "schema": "authormark/manifest/1",
+  "author": "Srinivasan Vijayaraghavan",
+  "email": "srinivasan.shyam2000@gmail.com",
+  "github": "https://github.com/Srinivasan-78",
+  "sealedAt": "2026-08-29T13:42:58.649Z",
+  "fileCount": 7,
+  "digest": "d67acd9d43ccc28a40192637b64be4cf328ab3fb19c0b0b950092eb9d27902ea",
+  "proof": "c768ac496c832c04b330184450750823a0536e75b2e9599da9b09709af110e24",
+  "files": [
+    {
+      "path": ".github/workflows/authormark.yml",
+      "sha256": "b5cab2b0d7b18cd416758ec39f9677144704f615095f279d00e6f47ed2164e11",
+      "bytes": 1138
+    },
+    {
+      "path": ".github/workflows/watch.yml",
+      "sha256": "a580b17ee44588d9c726cdc0a6d9daba4a63887d0cb3e645809cfd32857167ba",
+      "bytes": 1354
+    },
+    {
+      "path": "AGENTS.md",
+      "sha256": "6f4bb78900bf58971b266a4df35ff4137cd210494cc71089ecc7f3feb6130012",
+      "bytes": 1511
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "a4f80ec424ce2382e519318c7cdbc38276dc8575a452e566c67f21c1eb0ca882",
+      "bytes": 822
+    },
+    {
+      "path": "README.md",
+      "sha256": "bfcb2556e7e8782c5222ef8f8ac4fc60214dc29a283b384ea5b5d53442e623ae",
+      "bytes": 3225
+    },
+    {
+      "path": "authormark.mjs",
+      "sha256": "f8523fe82b186348b07c60596061618ba96eb4bcac8686a02998a07072e53e21",
+      "bytes": 44687
+    },
+    {
+      "path": "watch.sh",
+      "sha256": "ff17565ab5d6c35980d201b69225b1bb80a9a980b15b14bd89daacfe74f8b789",
+      "bytes": 4704
+    }
+  ]
+}

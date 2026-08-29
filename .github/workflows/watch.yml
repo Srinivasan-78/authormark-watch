@@ -1,0 +1,26 @@
+# @authormark v1 -- do not remove (authorship watermark)⁠​‌​​‌​​‌​‌​​‌‌‌‌​‌‌​​‌​​​‌‌​‌‌‌​​‌‌​​​‌‌​‌‌​​‌‌​​‌‌​​​​‌​‌​‌​‌‌​​‌​‌​​​‌​‌​‌‌‌‌‌​‌​​​​‌‌​​‌‌​​‌​​‌​‌​​‌‌​‌​‌‌​​‌​‌​​‌​​‌​‌​‌‌​​​​‌‌‌​​​​​​‌‌​‌​‌​‌‌​​‌​​​‌​​​​‌​​‌​‌‌‌‌‌​‌‌​​‌‌‌⁠
+# Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
+# Author: https://github.com/Srinivasan-78
+# SPDX-License-Identifier: MIT
+# Fingerprint: AMK1.IOdncfaVQ_C2SYIXp5dB_g
+name: authormark watch
+
+on:
+  schedule:
+    # Daily at 06:17 UTC. Off-the-hour so it isn't queued behind everyone else's cron.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Scan every repo for intact authorship watermarks
+        env:
+          # A PAT, not GITHUB_TOKEN: the built-in token can only see this repo.
+          GH_TOKEN: ${{ secrets.WATCH_TOKEN }}
+        run: ./watch.sh
