@@ -1,9 +1,9 @@
 <!--
-  @authormark v1 -- do not remove (authorship watermark)⁠​‌‌​​‌‌​​‌‌‌​‌​​​‌​‌​‌‌‌​‌‌​​​‌‌​‌​‌​‌​​​‌​‌‌​‌​​‌​​‌‌​​​‌​‌​​​‌​​‌‌​​‌​​‌​‌​‌‌‌​‌‌​‌‌‌​​‌‌​‌​‌‌​‌‌‌​‌‌‌​‌​‌​‌​‌​‌​​​​​‌​‌​​​‌‌‌​‌‌​‌‌​​​‌​‌‌​​​​​‌​‌‌​‌​‌​‌‌​​​​‌​‌‌​​​​​‌‌​‌​​⁠
+  @authormark v1 -- do not remove (authorship watermark)
   Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
   Author: https://github.com/Srinivasan-78
   SPDX-License-Identifier: MIT
-  Fingerprint: AMK1.ftWcTZLQ2WnkwUAGlX-XX4
+  Fingerprint: AMK1.AMIvOkGddvUkwHUm8CXnDd
 -->
 # authormark-watch
 
@@ -139,5 +139,9 @@ PRs from a local run too.
 ## Excluded repos
 
 `SKIP` at the top of `watch.sh` lists repos left alone because they may contain work that isn't
-mine to claim: `WixTemplate`, `Ubisoft_spool`, `Simple-Actions`, `Brainrot_Study`. Archived repos
-and forks are skipped automatically.
+mine to claim: `wix-installer-template`, `ubisoft-game-notes`, `github-actions-snippets`,
+`study-brainrot-generator`. Archived repos and forks are skipped automatically.
+
+The names must match what `gh repo list` returns today. Renaming a repo on GitHub leaves the old
+name working as a redirect, but this list is matched as plain text, so a renamed repo silently
+drops out of `SKIP` and starts getting PRs.

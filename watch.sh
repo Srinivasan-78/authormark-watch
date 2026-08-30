@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.2YBFsxAqyhF63HmzCuUizG
+# Fingerprint: AMK1.zUo3GxzQ5xfTDCZUfGLymy
 # Scan every repo this account owns and report any that is unmarked, has drifted,
 # or has had watermarks stripped. Runs on a schedule from authormark-watch.
 #
@@ -14,7 +14,10 @@ set -uo pipefail
 
 OWNER="${OWNER:-Srinivasan-78}"
 # Repos that may hold work that isn't mine to claim, plus this repo itself.
-SKIP=" WixTemplate Ubisoft_spool Simple-Actions Brainrot_Study authormark-watch "
+# Matched as plain text against `gh repo list`, so these must be the CURRENT names:
+# a rename on GitHub keeps the old name working as a redirect, but drops the repo
+# out of this list and starts opening PRs against it.
+SKIP=" wix-installer-template ubisoft-game-notes github-actions-snippets study-brainrot-generator authormark-watch "
 
 # FIX=1 does not just report -- it applies the marks and opens a PR per repo.
 FIX="${FIX:-0}"
