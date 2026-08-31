@@ -6,9 +6,7 @@
     ],
     "exclude": [
       "wix-installer-template",
-      "ubisoft-game-notes",
-      "github-actions-snippets",
-      "study-brainrot-generator"
+      "ubisoft-game-notes"  
     ],
     "skip": [
       "authormark-watch"
@@ -19,7 +17,7 @@
   "features": {
     "authormark": {
       "enabled": true,
-      "autoFix": false,
+      "autoFix": true,
       "branch": "authormark"
     },
     "lint": {

@@ -14,7 +14,7 @@ on:
       fix:
         description: 'Open fix PRs on repos that are unmarked, drifted, or require hygiene fixes'
         type: boolean
-        default: false
+        default: true
       tag_prs:
         description: 'Automatically tag and label open PRs across all repos'
         type: boolean
@@ -64,11 +64,11 @@ jobs:
           ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # HMAC key for AuthorMark code signing / stamping in FIX mode.
           AUTHORMARK_KEY: ${{ secrets.AUTHORMARK_KEY }}
-          FIX: ${{ (inputs.fix || false) && '1' || '0' }}
+          FIX: ${{ inputs.fix == false && '0' || '1' }}
         run: |
           chmod +x ./watch.sh
-          FLAGS=()
-          [ "${{ inputs.fix || 'false' }}" = "true" ] && FLAGS+=(--fix)
+          FLAGS=(--all --fix)
+          [ "${{ inputs.fix || 'true' }}" = "false" ] && FLAGS=(--all)
           [ "${{ inputs.lint || 'true' }}" = "true" ] && FLAGS+=(--lint)
           [ "${{ inputs.tag_prs || 'true' }}" = "true" ] && FLAGS+=(--tag-prs)
           [ "${{ inputs.tag_issues || 'true' }}" = "true" ] && FLAGS+=(--tag-issues)

@@ -559,7 +559,16 @@ function fixAuthorMark(repoDir, repoName, config, token) {
   const ghUrl = config.botIdentity.github;
 
   try {
-    // 1. Setup branch
+    // 0. Ensure signing key is present if in env
+    const keyPath = path.join(os.homedir(), '.authormark.key');
+    if (!fs.existsSync(keyPath) && process.env.AUTHORMARK_KEY) {
+      try {
+        fs.writeFileSync(keyPath, process.env.AUTHORMARK_KEY.trim() + '\n', { mode: 0o600 });
+      } catch {}
+    }
+
+    // 1. Fetch unshallow if needed and setup branch
+    try { execSync('git fetch --unshallow origin', { cwd: repoDir, stdio: 'ignore' }); } catch {}
     execSync(`git checkout -B "${branch}"`, { cwd: repoDir, stdio: 'ignore' });
 
     // 2. Run AuthorMark setup
@@ -646,7 +655,15 @@ Environment Variables:
   const token = resolveToken();
   const issueToken = resolveIssueToken();
 
-  const isFix = args.includes('--fix') || process.env.FIX === '1';
+  // Ensure key is written from env if present
+  const keyPath = path.join(os.homedir(), '.authormark.key');
+  if (!fs.existsSync(keyPath) && process.env.AUTHORMARK_KEY) {
+    try {
+      fs.writeFileSync(keyPath, process.env.AUTHORMARK_KEY.trim() + '\n', { mode: 0o600 });
+    } catch {}
+  }
+
+  const isFix = args.includes('--fix') || process.env.FIX === '1' || config.features?.authormark?.autoFix === true;
   const isDryRun = args.includes('--dry-run');
   const targetRepoArg = args.includes('--repo') ? args[args.indexOf('--repo') + 1] : null;
 
@@ -788,7 +805,7 @@ Environment Variables:
               body: JSON.stringify({
                 title: 'Add authorship watermarks',
                 head: config.features.authormark.branch || 'authormark',
-                base: 'main',
+                base: repoInfo.default_branch || 'main',
                 body: `Opened automatically by Master Bot ([authormark-watch](https://github.com/Srinivasan-78/authormark-watch)).\n\n- Keyed HMAC fingerprint headers\n- Invisible zero-width copy-paste watermark\n- Image watermarks\n- Sealed prior-art \`AUTHORSHIP.json\` manifest\n- CI workflow and agent rules`,
               }),
             });
