@@ -3,7 +3,7 @@
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
 # Fingerprint: AMK1.zzYpueq0qwENuefBcq7RwJ
-name: authormark watch
+name: Master Bot Supervisor
 
 on:
   schedule:
@@ -12,39 +12,65 @@ on:
   workflow_dispatch:
     inputs:
       fix:
-        description: 'Open a fix PR on every repo that is unmarked or drifted'
+        description: 'Open fix PRs on repos that are unmarked, drifted, or require hygiene fixes'
         type: boolean
         default: false
+      tag_prs:
+        description: 'Automatically tag and label open PRs across all repos'
+        type: boolean
+        default: true
+      tag_issues:
+        description: 'Automatically triage and tag open issues across all repos'
+        type: boolean
+        default: true
+      lint:
+        description: 'Run multi-language code linting and hygiene scan'
+        type: boolean
+        default: true
+      target_repo:
+        description: 'Specific repository to target (leave blank to supervise all repos including automatch)'
+        type: string
+        default: ''
 
-# A manual run and the nightly cron overlapping would open the same fix PR twice.
+# A manual run and the nightly cron overlapping would open duplicate fix PRs or race tags.
 concurrency:
-  group: authormark-watch
+  group: authormark-master-bot
   cancel-in-progress: false
 
 jobs:
-  scan:
+  supervisor:
     runs-on: ubuntu-latest
-    # A hung clone should not sit on a runner for the default six hours.
-    timeout-minutes: 20
-    # Only for the status issue in this repo; every cross-repo call uses the PAT.
+    timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write
       issues: write
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - name: Checkout Master Bot Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Scan every repo for intact authorship watermarks
+
+      - name: Run Master Bot Account Supervisor
         env:
-          # A PAT, not GITHUB_TOKEN: the built-in token can only see this repo.
-          # BOT_TOKEN, when set, is the bot account's token -- the PRs are opened
-          # by whoever owns the token used here.
+          # A PAT with repo/issues/pull-requests scope across all repos.
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          WATCH_TOKEN: ${{ secrets.WATCH_TOKEN }}
           GH_TOKEN: ${{ secrets.BOT_TOKEN || secrets.WATCH_TOKEN }}
-          # The status issue is filed in this repo, which the PAT above is often
-          # not scoped to see. The built-in token always can.
+          # The status dashboard issue is filed in this repo using GITHUB_TOKEN.
           ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Only needed for FIX=1: fingerprints are HMACs of the file contents.
+          # HMAC key for AuthorMark code signing / stamping in FIX mode.
           AUTHORMARK_KEY: ${{ secrets.AUTHORMARK_KEY }}
-          FIX: ${{ inputs.fix && '1' || '0' }}
-        run: ./watch.sh
+          FIX: ${{ (inputs.fix || false) && '1' || '0' }}
+        run: |
+          chmod +x ./watch.sh
+          FLAGS=()
+          [ "${{ inputs.fix || 'false' }}" = "true" ] && FLAGS+=(--fix)
+          [ "${{ inputs.lint || 'true' }}" = "true" ] && FLAGS+=(--lint)
+          [ "${{ inputs.tag_prs || 'true' }}" = "true" ] && FLAGS+=(--tag-prs)
+          [ "${{ inputs.tag_issues || 'true' }}" = "true" ] && FLAGS+=(--tag-issues)
+          [ -n "${{ inputs.target_repo }}" ] && FLAGS+=(--repo "${{ inputs.target_repo }}")
+          ./watch.sh "${FLAGS[@]}"

@@ -5,143 +5,143 @@
   SPDX-License-Identifier: MIT
   Fingerprint: AMK1.AMIvOkGddvUkwHUm8CXnDd
 -->
-# authormark-watch
+# authormark-watch (Master Bot & Repository Supervisor)
 
-One scheduled job that keeps eyes on **every** repo in this account.
+A centralized **Master Bot** that supervises, maintains, and secures **every repository** in your GitHub account (`@Srinivasan-78`), including flagship repositories like `automatch`, new repositories, and legacy projects.
 
-Each repo's own `authormark` workflow only watches itself, and only if someone remembered to set
-it up. This repo is the backstop: daily, it enumerates every non-archived, non-fork repo and
-reports any that has no watermarks, has had them stripped, or has drifted (new files added
-unstamped). Findings go into a single GitHub issue that is updated in place and closed
-automatically once everything is clean again — so it never spams.
+Operates autonomously on a daily schedule via GitHub Actions, or manually via CLI.
 
-It also catches **brand-new repos** you forgot to run `authormark setup` on.
+---
 
-With `FIX=1` it does more than report: for every repo that is unmarked or drifted it applies the
-marks on an `authormark` branch, commits as a bot account, pushes, and opens a pull request. One PR
-per repo — a later run pushes to the same branch and reuses the open PR rather than opening a second
-one.
+## Capabilities
 
-## Why it uses its own checker
+### 1. 🔏 AuthorMark Code Watermarking & Signing
+- Scans every repository for intact `@authormark v1` headers, keyed HMAC fingerprints, invisible zero-width copy-paste marks, image watermarks, and sealed `AUTHORSHIP.json` manifests.
+- In **Fix Mode** (`--fix` / `FIX=1`), checks out an `authormark` branch, stamps unmarked or drifted files, commits as a bot, pushes, and opens/updates a clean Pull Request.
 
-`watch.sh` runs *this repo's* copy of `authormark.mjs`, never the one vendored inside the repo
-being checked. Someone who strips the watermarks from a repo could just as easily edit that repo's
-own `.authormark/authormark.mjs` to always exit 0 — the repo's CI would go green while lying.
-Checking from outside, with a copy they don't control, closes that hole.
+### 2. 🧹 Multi-Language Code Linting & Hygiene Scan
+- **Secret & Token Scanning**: Detects committed GitHub PATs, Firebase/Google API keys, AWS credentials, private keys, Slack/Discord webhooks, JWT tokens, and committed `.env` files.
+- **Syntax & Manifest Validation**: Validates `.json` and manifest structure across projects.
+- **Hygiene & Cache Protection**: Detects and flags tracked `.pyc`, `__pycache__`, OS metadata (`.DS_Store`, `Thumbs.db`), and uncommitted build artifacts.
+- **Repository Health Standards**: Verifies presence and contents of `LICENSE`, `README.md`, `.gitignore`, `AGENTS.md` / `CLAUDE.md`, and `SECURITY.md`.
 
-## One-time setup
+### 3. 🏷️ Automated PR Tagging & Labeling
+- Analyzes all open pull requests across all monitored repositories.
+- Automatically calculates and applies:
+  - **Size Tags**: `size/XS` (<10 lines), `size/S` (10-49), `size/M` (50-249), `size/L` (250-999), `size/XL` (1000+).
+  - **Type Tags**: `type/feat`, `type/fix`, `type/docs`, `type/chore`, `type/refactor`, `type/test`, `type/ci`, `type/authormark`, `type/dependencies`.
+  - **Language Tags**: `lang/typescript`, `lang/javascript`, `lang/python`, `lang/rust`, `lang/go`, `lang/web`, `lang/shell`, `lang/c-cpp`.
+  - **Workflow Tags**: `needs-review`, `automated-pr`, `bot`, `work-in-progress`.
+- Automatically provisions missing labels on repositories with standard color palettes and descriptions.
 
-The workflow needs a token that can read your other repos. `GITHUB_TOKEN` can't — it is scoped to
-this repo alone.
+### 4. 📋 Automated Issue Tagging & Triage
+- Analyzes all open issues across repositories for keywords, scope, and urgency.
+- Automatically assigns:
+  - **Category Tags**: `bug`, `enhancement`, `documentation`, `question`, `security`, `performance`.
+  - **Priority & Triage**: `triage`, `needs-info`, `good first issue`, `priority/high`, `priority/medium`, `priority/low`.
+- Ensures issue labels exist with proper colors.
 
-1. Create a **fine-grained personal access token** at
-   <https://github.com/settings/personal-access-tokens/new>
+### 5. 🎯 Flagship `automatch` Dedicated Monitor
+- Dedicated status monitoring, health inspection, and custom configuration for the `automatch` repository alongside all other account repos.
+
+### 6. 📊 Consolidated Master Dashboard
+- Posts and maintains a single, non-spamming tracking issue on `authormark-watch` (`authormark: Master Bot Status Dashboard`), closing automatically once all repositories are clean.
+
+---
+
+## Configuration (`bot.config.json`)
+
+Configure repository rules, features, and labeling in `bot.config.json`:
+
+```json
+{
+  "owner": "Srinivasan-78",
+  "repos": {
+    "include": ["automatch"],
+    "exclude": [
+      "wix-installer-template",
+      "ubisoft-game-notes",
+      "github-actions-snippets",
+      "study-brainrot-generator"
+    ],
+    "skip": ["authormark-watch"],
+    "includeForks": false,
+    "includeArchived": false
+  },
+  "features": {
+    "authormark": { "enabled": true, "autoFix": false, "branch": "authormark" },
+    "lint": { "enabled": true, "scanSecrets": true, "scanHygiene": true, "scanRepoHealth": true },
+    "prTagger": { "enabled": true, "sizeLabels": true, "typeLabels": true, "langLabels": true, "autoCreateLabels": true },
+    "issueTagger": { "enabled": true, "categoryLabels": true, "priorityLabels": true, "triageLabel": true, "autoCreateLabels": true }
+  }
+}
+```
+
+---
+
+## One-Time Setup
+
+The workflow requires a token with permissions to supervise your repositories.
+
+1. Create a **Fine-Grained Personal Access Token** at <https://github.com/settings/personal-access-tokens/new>:
    - Resource owner: `Srinivasan-78`
    - Repository access: **All repositories**
-   - Permissions → Repository: **Contents: Read-only**, **Metadata: Read-only**,
-     **Issues: Read and write**
-   - Expiration: set a reminder to rotate it
+   - Permissions:
+     - **Contents**: Read and Write (for creating AuthorMark fix branches & PRs)
+     - **Pull requests**: Read and Write (for creating PRs and applying PR labels)
+     - **Issues**: Read and Write (for triaging issues and updating the dashboard)
+     - **Workflows**: Read and Write (for stamping workflow files under `.github/workflows/`)
+     - **Metadata**: Read-only
 
-   A classic PAT with the `repo` scope also works, but grants far more than this needs.
-
-2. Add it as a secret named `WATCH_TOKEN`:
-
+2. Add it as a secret named `BOT_TOKEN` (or `WATCH_TOKEN`):
    ```sh
-   gh secret set WATCH_TOKEN --repo Srinivasan-78/authormark-watch
+   gh secret set BOT_TOKEN --repo Srinivasan-78/authormark-watch
    ```
 
-3. Trigger a first run:
+3. (Optional for CI Fix Mode) Add your HMAC key as `AUTHORMARK_KEY`:
+   ```sh
+   gh secret set AUTHORMARK_KEY --repo Srinivasan-78/authormark-watch < ~/.authormark.key
+   ```
 
+4. Trigger a workflow run:
    ```sh
    gh workflow run watch.yml --repo Srinivasan-78/authormark-watch
-   gh workflow run watch.yml --repo Srinivasan-78/authormark-watch -f fix=true   # and fix what it finds
+   gh workflow run watch.yml --repo Srinivasan-78/authormark-watch -f fix=true
    ```
 
-Until `WATCH_TOKEN` exists the scheduled run will fail at the clone step — that failure is the
-signal that step 2 is still outstanding.
+---
 
-Two things that make the monitor go quietly blind, so check both:
+## Local CLI Usage
 
-- **"All repositories", not a hand-picked list.** A token scoped to selected repos makes the ones
-  it cannot see simply absent from the scan — they are not reported as failures, because the
-  listing never mentions them. Compare the repo count in the run log against
-  `gh repo list Srinivasan-78 --no-archived --json name --jq 'length'`; if CI's number is lower,
-  the token is missing repos.
-- **GitHub disables `schedule:` after 60 days without a push to the repo.** A silent monitor and a
-  clean account look identical. If the daily run stops appearing, re-enable it with
-  `gh workflow enable watch.yml --repo Srinivasan-78/authormark-watch`.
-
-The status issue is filed in *this* repo, so it does not use that PAT at all: the workflow passes
-the built-in `GITHUB_TOKEN` as `ISSUE_TOKEN` and grants itself `issues: write`. A PAT scoped to the
-repos being scanned usually cannot see this one, and GitHub reports that as
-`Could not resolve to a Repository` rather than as a permission error.
-
-## Opening fix PRs automatically
-
-Reporting is the default. To have the watcher fix what it finds:
+Run the master bot locally using Node.js (Node ≥ 18, zero npm dependencies):
 
 ```sh
+# Supervise all repositories (dry-run mode)
+node bot.mjs --dry-run
+
+# Run full scan across all repos and update status dashboard
+node bot.mjs --all
+
+# Run AuthorMark fix pass (opens PRs on unmarked/drifted repos)
+node bot.mjs --fix
+
+# Target a specific repository (e.g. automatch)
+node bot.mjs --repo automatch
+
+# Run individual subsystems
+node bot.mjs --lint
+node bot.mjs --tag-prs
+node bot.mjs --tag-issues
+
+# Or use the bash wrapper
+./watch.sh
 FIX=1 ./watch.sh
 ```
 
-For each unmarked or drifted repo it checks out a branch named `authormark`, runs `authormark
-setup` (config, vendored tool, CI workflow, agent rules, LICENSE, stamped sources, watermarked
-images, sealed manifest), commits, pushes with `--force-with-lease`, and opens a PR. Repos that are
-already clean are untouched, and nothing is ever pushed to a default branch. The PR links appear in
-the status issue alongside everything else.
+---
 
-### Who the PR comes from
+## Architecture & Security
 
-The pull request is opened by whichever account owns the token in `GH_TOKEN`, so to have it come
-from a bot rather than from you, give the workflow a bot account's token as the `BOT_TOKEN` secret:
-
-```sh
-gh secret set BOT_TOKEN --repo Srinivasan-78/authormark-watch
-```
-
-That token needs **Contents: read and write**, **Pull requests: read and write**, and **Workflows:
-read and write** on the repos it will fix, plus **Metadata: read-only**. Workflows permission is
-required because `authormark setup` adds `.github/workflows/authormark.yml` and stamps any workflow
-files already there; without it the push is rejected and the fix is reported as failed. When `BOT_TOKEN` is absent the workflow falls back to
-`WATCH_TOKEN`, which is read-only, and every fix attempt will be reported as failed.
-
-The commits themselves are attributed to `github-actions[bot]`. Override with the `BOT_NAME` and
-`BOT_EMAIL` environment variables if your bot account is a different one.
-
-### The signing key
-
-Fingerprints are HMACs, so nothing can be stamped without `~/.authormark.key`. Locally that file is
-already there and `FIX=1` just works. In CI the job reads the key from an `AUTHORMARK_KEY` secret
-and writes it to that path.
-
-Think carefully before adding that secret. The key is the thing that makes a fingerprint provably
-yours, and a copy of it in GitHub Actions is a copy you no longer fully control — anyone who can
-push a workflow to this repository, or who gains admin access to it, can print it. Running `FIX=1`
-from your own machine on a schedule keeps the key off GitHub entirely, and is the safer default. If
-you do put it in CI, restrict who can edit workflows in this repo and plan to rotate the key if that
-ever changes — though note that rotating invalidates every fingerprint already issued, so the
-practical answer is usually to keep the key local.
-
-Without the key, `FIX=1` exits immediately with an explanation rather than opening empty PRs.
-
-## Running it locally
-
-```sh
-./watch.sh              # scan and open/update the issue
-REPORT=0 ./watch.sh     # scan and print the report only
-FIX=1 ./watch.sh        # scan, then open a fix PR per problem repo
-```
-
-Locally it uses your `gh auth` session, so no token setup is needed — which also means locally the
-PRs come from *your* account, not the bot's. Set `GH_TOKEN` to the bot's token to get bot-authored
-PRs from a local run too.
-
-## Excluded repos
-
-`SKIP` at the top of `watch.sh` lists repos left alone because they may contain work that isn't
-mine to claim: `wix-installer-template`, `ubisoft-game-notes`, `github-actions-snippets`,
-`study-brainrot-generator`. Archived repos and forks are skipped automatically.
-
-The names must match what `gh repo list` returns today. Renaming a repo on GitHub leaves the old
-name working as a redirect, but this list is matched as plain text, so a renamed repo silently
-drops out of `SKIP` and starts getting PRs.
+- **Independent Checker**: `bot.mjs` runs from *this* repository and never trusts or executes foreign code inside target repositories.
+- **Zero Dependencies**: Pure Node.js standard library (`fs`, `path`, `crypto`, `child_process`, native `fetch`).
+- **Safe Push Mode**: Never pushes directly to default branches (`main`/`master`); all fixes are submitted via isolated branches and pull requests.

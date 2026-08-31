@@ -1,0 +1,100 @@
+{
+  "owner": "Srinivasan-78",
+  "repos": {
+    "include": [
+      "automatch"
+    ],
+    "exclude": [
+      "wix-installer-template",
+      "ubisoft-game-notes",
+      "github-actions-snippets",
+      "study-brainrot-generator"
+    ],
+    "skip": [
+      "authormark-watch"
+    ],
+    "includeForks": false,
+    "includeArchived": false
+  },
+  "features": {
+    "authormark": {
+      "enabled": true,
+      "autoFix": false,
+      "branch": "authormark"
+    },
+    "lint": {
+      "enabled": true,
+      "scanSecrets": true,
+      "scanHygiene": true,
+      "scanRepoHealth": true,
+      "autoFix": false
+    },
+    "prTagger": {
+      "enabled": true,
+      "sizeLabels": true,
+      "typeLabels": true,
+      "langLabels": true,
+      "statusLabels": true,
+      "autoCreateLabels": true
+    },
+    "issueTagger": {
+      "enabled": true,
+      "categoryLabels": true,
+      "priorityLabels": true,
+      "triageLabel": true,
+      "autoCreateLabels": true
+    }
+  },
+  "botIdentity": {
+    "name": "github-actions[bot]",
+    "email": "41898282+github-actions[bot]@users.noreply.github.com",
+    "author": "Srinivasan Vijayaraghavan",
+    "authorEmail": "srinivasan.shyam2000@gmail.com",
+    "github": "https://github.com/Srinivasan-78"
+  },
+  "labelPalette": {
+    "size/XS": { "color": "0e8a16", "description": "PR with < 10 lines changed" },
+    "size/S": { "color": "55c423", "description": "PR with 10-49 lines changed" },
+    "size/M": { "color": "fbca04", "description": "PR with 50-249 lines changed" },
+    "size/L": { "color": "f97515", "description": "PR with 250-999 lines changed" },
+    "size/XL": { "color": "d93f0b", "description": "PR with 1000+ lines changed" },
+
+    "type/feat": { "color": "1d76db", "description": "New feature or capability" },
+    "type/fix": { "color": "d73a4a", "description": "Bug fix" },
+    "type/docs": { "color": "0075ca", "description": "Documentation additions or updates" },
+    "type/chore": { "color": "cfd3d7", "description": "Maintenance, refactoring, or tooling" },
+    "type/refactor": { "color": "a2eeef", "description": "Code refactoring without feature change" },
+    "type/test": { "color": "bfdadc", "description": "Adding or updating test suites" },
+    "type/ci": { "color": "0052cc", "description": "CI/CD pipelines, workflows, or actions" },
+    "type/authormark": { "color": "6f42c1", "description": "AuthorMark watermark and code signing" },
+    "type/dependencies": { "color": "0366d6", "description": "Dependency and package updates" },
+
+    "lang/typescript": { "color": "3178c6", "description": "TypeScript codebase changes" },
+    "lang/javascript": { "color": "f1e05a", "description": "JavaScript codebase changes" },
+    "lang/python": { "color": "3572a5", "description": "Python codebase changes" },
+    "lang/rust": { "color": "dea584", "description": "Rust codebase changes" },
+    "lang/go": { "color": "00add8", "description": "Go codebase changes" },
+    "lang/web": { "color": "e34c26", "description": "HTML, CSS, Tailwind, or frontend templates" },
+    "lang/shell": { "color": "89e051", "description": "Shell, Bash, or PowerShell scripts" },
+    "lang/c-cpp": { "color": "555555", "description": "C or C++ source code" },
+
+    "needs-review": { "color": "e99695", "description": "Ready and waiting for maintainer review" },
+    "automated-pr": { "color": "5319e7", "description": "Opened automatically by Master Bot" },
+    "bot": { "color": "6e5494", "description": "Authored or managed by bot" },
+    "work-in-progress": { "color": "e4e669", "description": "Draft or work-in-progress pull request" },
+
+    "bug": { "color": "d73a4a", "description": "Something isn't working as expected" },
+    "enhancement": { "color": "a2eeef", "description": "Feature or enhancement request" },
+    "documentation": { "color": "0075ca", "description": "Improvements or additions to documentation" },
+    "question": { "color": "d876e3", "description": "Further information is requested" },
+    "security": { "color": "b60205", "description": "Security vulnerability or secret finding" },
+    "performance": { "color": "ff7619", "description": "Performance improvement or optimization" },
+    "triage": { "color": "fef2c0", "description": "New issue awaiting triage" },
+    "needs-info": { "color": "e99695", "description": "Needs more details or reproduction steps" },
+    "good first issue": { "color": "7057ff", "description": "Good for newcomers" },
+    "priority/high": { "color": "b60205", "description": "High priority issue" },
+    "priority/medium": { "color": "fbca04", "description": "Medium priority issue" },
+    "priority/low": { "color": "c2e0c6", "description": "Low priority issue" }
+  }
+}
+
