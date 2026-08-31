@@ -394,6 +394,167 @@ function lintRepository(repoDir, repoName) {
   return findings;
 }
 
+const STANDARD_GITIGNORE = `# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node.js & Web
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.next/
+dist/
+build/
+out/
+.turbo/
+.cache/
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+`;
+
+function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot-hygiene') {
+  const owner = config.owner;
+  const botName = config.botIdentity.name;
+  const botEmail = config.botIdentity.email;
+  const author = config.botIdentity.author;
+  const year = new Date().getFullYear();
+
+  const changesMade = [];
+
+  try {
+    // 0. Ensure branch is checked out
+    try {
+      execSync('git fetch --unshallow origin', { cwd: repoDir, stdio: 'ignore' });
+    } catch {}
+    execSync(`git checkout -B "${branch}"`, { cwd: repoDir, stdio: 'ignore' });
+
+    // 1. Remove unwanted tracked files (bytecode, OS files)
+    let tracked = [];
+    try {
+      tracked = execSync('git ls-files', { cwd: repoDir, encoding: 'utf8' }).split('\n');
+    } catch {}
+
+    for (const file of tracked) {
+      if (!file) continue;
+      const bname = path.basename(file);
+      if (bname.endsWith('.pyc') || file.includes('__pycache__') || bname === '.DS_Store' || bname === 'Thumbs.db') {
+        try {
+          execSync(`git rm -f --ignore-unmatch "${file}"`, { cwd: repoDir, stdio: 'ignore' });
+          changesMade.push(`Removed tracked artifact: \`${file}\``);
+        } catch {}
+      }
+    }
+
+    // 2. Fix / Create .gitignore
+    const gitignorePath = path.join(repoDir, '.gitignore');
+    if (!fs.existsSync(gitignorePath)) {
+      fs.writeFileSync(gitignorePath, STANDARD_GITIGNORE);
+      changesMade.push('Created standard `.gitignore`');
+    } else {
+      let giContent = fs.readFileSync(gitignorePath, 'utf8');
+      const additions = [];
+      if (!giContent.includes('__pycache__')) additions.push('__pycache__/', '*.py[cod]');
+      if (!giContent.includes('.DS_Store')) additions.push('.DS_Store', 'Thumbs.db');
+      if (!giContent.includes('node_modules') && fs.existsSync(path.join(repoDir, 'package.json'))) additions.push('node_modules/');
+      if (!giContent.includes('.env')) additions.push('.env', '.env.local');
+
+      if (additions.length > 0) {
+        giContent += '\n# Master Bot hygiene additions\n' + additions.join('\n') + '\n';
+        fs.writeFileSync(gitignorePath, giContent);
+        changesMade.push('Added missing security and cache ignore rules to `.gitignore`');
+      }
+    }
+
+    // 3. Fix / Create LICENSE
+    const hasLicense = ['LICENSE', 'LICENSE.md', 'LICENSE.txt', 'LICENCE', 'LICENCE.md'].some(f => fs.existsSync(path.join(repoDir, f)));
+    if (!hasLicense) {
+      const mit = `MIT License\n\nCopyright (c) ${year} ${author}\n${config.botIdentity.github}\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the "Software"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n`;
+      fs.writeFileSync(path.join(repoDir, 'LICENSE'), mit);
+      changesMade.push('Created standard `LICENSE` (MIT)');
+    }
+
+    // 4. Fix / Create README.md
+    if (!fs.existsSync(path.join(repoDir, 'README.md')) && !fs.existsSync(path.join(repoDir, 'readme.md'))) {
+      const readme = `# ${repoName}\n\nRepository maintained by [@${owner}](https://github.com/${owner}).\n`;
+      fs.writeFileSync(path.join(repoDir, 'README.md'), readme);
+      changesMade.push('Created initial `README.md`');
+    }
+
+    // 5. Fix / Create AGENTS.md / CLAUDE.md
+    if (!fs.existsSync(path.join(repoDir, 'AGENTS.md')) && !fs.existsSync(path.join(repoDir, 'CLAUDE.md'))) {
+      const agents = `# Repo rules\n\n## Authorship headers — never remove\n\nSource files in this repo begin with an \`@authormark v1\` comment block (copyright, author URL, SPDX line, and a keyed \`Fingerprint:\`). It is a watermark, not boilerplate.\n\n- Never delete, edit, reorder, or relocate that block.\n- When you move or rename a file, the header moves with it.\n- CI runs checks on every PR.\n`;
+      const claude = `# Repo rules\n\n@AGENTS.md\n`;
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), agents);
+      fs.writeFileSync(path.join(repoDir, 'CLAUDE.md'), claude);
+      changesMade.push('Created `AGENTS.md` and `CLAUDE.md` rules');
+    }
+
+    // 6. Fix Trailing Whitespace in code/text files
+    const allFiles = walkFiles(repoDir);
+    let wsFilesFixed = 0;
+    for (const f of allFiles) {
+      const ext = path.extname(f).toLowerCase();
+      if (['.js', '.ts', '.jsx', '.tsx', '.py', '.rs', '.go', '.sh', '.md', '.json', '.yml', '.yaml'].includes(ext)) {
+        try {
+          const raw = fs.readFileSync(f, 'utf8');
+          const cleaned = raw.split('\n').map(l => l.replace(/[ \t]+$/, '')).join('\n');
+          if (cleaned !== raw) {
+            fs.writeFileSync(f, cleaned);
+            wsFilesFixed++;
+          }
+        } catch {}
+      }
+    }
+    if (wsFilesFixed > 0) {
+      changesMade.push(`Normalized trailing whitespace in ${wsFilesFixed} file(s)`);
+    }
+
+    // Check git status
+    const status = execSync('git status --porcelain', { cwd: repoDir, encoding: 'utf8' }).trim();
+    if (!status) {
+      return { success: true, changes: [], message: 'No changes needed' };
+    }
+
+    // Stage & Commit
+    execSync('git add -A', { cwd: repoDir, stdio: 'ignore' });
+    const commitMsg = `chore: code hygiene, standard files & ignore rules\n\n${changesMade.map(c => `- ${c}`).join('\n')}`;
+    execSync(`git -c "user.name=${botName}" -c "user.email=${botEmail}" commit -m "${commitMsg}"`, {
+      cwd: repoDir,
+      stdio: 'ignore',
+    });
+
+    // Push branch
+    if (token) {
+      const pushUrl = `https://x-access-token:${token}@github.com/${owner}/${repoName}.git`;
+      execSync(`git push -u "${pushUrl}" "${branch}" --force-with-lease`, { cwd: repoDir, stdio: 'ignore' });
+    } else {
+      execSync(`git push -u origin "${branch}" --force-with-lease`, { cwd: repoDir, stdio: 'ignore' });
+    }
+
+    return { success: true, branch, changes: changesMade, message: `Pushed hygiene fixes to ${branch}` };
+  } catch (err) {
+    return { success: false, changes: [], error: sanitize(err.message) };
+  }
+}
+
 // ---------------------------------------------------------------- Intelligent PR Auto-Tagger
 
 function classifyPullRequest(pr, files, palette) {
@@ -738,6 +899,7 @@ Environment Variables:
     automatchStatus: null,
     authormark: { clean: [], drifted: [], unmarked: [], fixed: [], fixFailed: [] },
     lintFindings: [],
+    lintFixed: [],
     prsTagged: [],
     issuesTagged: [],
     failedRepos: [],
@@ -832,11 +994,49 @@ Environment Variables:
         lintRes.secrets.length +
         lintRes.syntaxErrors.length +
         lintRes.unwantedArtifacts.length +
-        lintRes.standards.length;
+        lintRes.standards.length +
+        lintRes.whitespaceIssues.length;
 
       if (issueCount > 0) {
         log(`    ⚠️ Found ${issueCount} hygiene / lint findings.`);
         summary.lintFindings.push({ name, ...lintRes });
+
+        const hasFixable = lintRes.unwantedArtifacts.length > 0 || lintRes.standards.length > 0 || lintRes.whitespaceIssues.length > 0;
+        const lintAutoFix = isFix || config.features?.lint?.autoFix === true;
+
+        if (hasFixable && lintAutoFix && !isDryRun) {
+          log(`    🔧 Attempting automated repository hygiene & standards fix...`);
+          const hygieneBranch = fixPrUrl ? (config.features.authormark.branch || 'authormark') : 'masterbot-hygiene';
+          const lintFixResult = fixLintRepository(repoDir, name, config, token, hygieneBranch);
+          if (lintFixResult.success && lintFixResult.changes.length > 0) {
+            log(`    ✅ ${lintFixResult.message} (${lintFixResult.changes.length} change(s))`);
+            if (!fixPrUrl && token) {
+              try {
+                const prs = await client.listPullRequests(config.owner, name, 'open');
+                const existingPr = prs.find(p => p.head && p.head.ref === hygieneBranch);
+                if (existingPr) {
+                  summary.lintFixed.push({ name, prUrl: existingPr.html_url, action: 'Updated PR', changes: lintFixResult.changes });
+                } else {
+                  const newPr = await client.request(`/repos/${config.owner}/${name}/pulls`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      title: 'chore: repository hygiene & standard rules',
+                      head: hygieneBranch,
+                      base: repoInfo.default_branch || 'main',
+                      body: `Opened automatically by Master Bot ([authormark-watch](https://github.com/Srinivasan-78/authormark-watch)) to apply code hygiene and repository standards:\n\n${lintFixResult.changes.map(c => `- ${c}`).join('\n')}`,
+                    }),
+                  });
+                  summary.lintFixed.push({ name, prUrl: newPr.html_url, action: 'Opened PR', changes: lintFixResult.changes });
+                  await client.addLabels(config.owner, name, newPr.number, ['automated-pr', 'bot', 'type/chore', 'needs-review']);
+                }
+              } catch (prErr) {
+                warn(`Could not open hygiene PR for ${name}: ${prErr.message}`);
+              }
+            } else if (fixPrUrl) {
+              summary.lintFixed.push({ name, prUrl: fixPrUrl, action: 'Included in PR', changes: lintFixResult.changes });
+            }
+          }
+        }
       } else {
         log(`    ✅ Code lint & repository hygiene clean.`);
       }
@@ -1026,6 +1226,13 @@ function buildMarkdownReport(config, summary) {
 
   // Code Lint & Hygiene Section
   lines.push(`## 🧹 Multi-Language Code Lint & Repository Hygiene`);
+  if (summary.lintFixed && summary.lintFixed.length > 0) {
+    lines.push(`### 🤖 Automated Hygiene Fix PRs Opened / Updated`);
+    for (const r of summary.lintFixed) {
+      lines.push(`- \`${r.name}\`: [${r.action}](${r.prUrl}) — ${r.changes.join(', ')}`);
+    }
+    lines.push('');
+  }
   if (summary.lintFindings.length === 0) {
     lines.push(`- ✅ All repositories passed secret scans, syntax checks, and repository standards.\n`);
   } else {
