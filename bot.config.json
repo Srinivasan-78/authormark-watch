@@ -1,9 +1,6 @@
 {
   "owner": "Srinivasan-78",
   "repos": {
-    "include": [
-      "automatch"
-    ],
     "exclude": [
       "wix-installer-template",
       "ubisoft-game-notes"  
