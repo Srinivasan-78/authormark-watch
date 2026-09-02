@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /*!
- * @authormark v1 -- do not remove (authorship watermark)
+ * @authormark v1 -- do not remove (authorship watermark)⁠​‌‌​‌​​‌​‌‌‌​‌​‌​‌​​‌​​​​‌​‌​​​​​‌​‌​‌‌‌​‌‌​​​​‌​‌​​​‌​‌​​‌‌​‌​‌​​‌‌​‌​‌​​‌‌‌​​​​‌​​‌‌‌‌​‌‌​​​‌‌​‌‌‌​​​​​‌‌‌‌​‌​​‌​​‌​‌​​‌‌‌​‌​​​‌​‌​​​​​‌​​​‌‌​​‌‌‌​‌​‌​‌‌​‌​‌​​‌‌​​‌‌​​​‌‌​​​​⁠
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.PDpy6vA564aPNmDpxsXwWj
+ * Fingerprint: AMK1.iuHPWaE558OcpzJtPFujf0
  */
 // authormark -- layered authorship watermarking for source code and images.
 // Zero dependencies. Node >= 18.
@@ -15,10 +15,13 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const CWD = process.cwd();
 const CONFIG_FILE = '.authormark.json';
 const MANIFEST_FILE = 'AUTHORSHIP.json';
+const LOG_FILE = 'AUTHORSHIP.log';
+const ATTEST_FILE = 'AUTHORSHIP.intoto.jsonl';
 const SENTINEL = '@authormark v1';
 const NOREMOVE = '-- do not remove';
 // A line only counts as a header when it carries BOTH markers, so docs and
@@ -28,31 +31,56 @@ const FP_LABEL = 'Fingerprint: AMK1.';
 const SKIP_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'out', 'coverage', '.turbo',
   '.vercel', 'vendor', '__pycache__', 'venv', 'site-packages', 'third_party', 'target', '.mypy_cache']);
 
-const DEFAULT_EXTS = ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.css', '.scss', '.sass', '.less',
-  '.py', '.go', '.rs', '.java', '.kt', '.swift', '.c', '.h', '.cpp', '.hpp', '.cs', '.php', '.rb',
-  '.sh', '.bash', '.zsh', '.sql', '.lua', '.html', '.htm', '.svg', '.vue', '.svelte', '.md', '.yml', '.yaml', '.toml',
-  '.bat', '.cmd', '.ps1', '.psm1', '.tf', '.tfvars', '.hcl', '.r', '.pl'];
+const DEFAULT_EXTS = ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts', '.css', '.scss', '.sass', '.less',
+  '.py', '.pyi', '.go', '.rs', '.java', '.kt', '.kts', '.swift', '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.mm',
+  '.cs', '.php', '.rb', '.sh', '.bash', '.zsh', '.fish', '.sql', '.lua', '.html', '.htm', '.svg', '.vue', '.svelte',
+  '.astro', '.md', '.mdx', '.yml', '.yaml', '.toml', '.bat', '.cmd', '.ps1', '.psm1', '.tf', '.tfvars', '.hcl',
+  '.r', '.pl', '.pm', '.dart', '.scala', '.sc', '.groovy', '.gradle', '.d', '.cr', '.nim', '.jl', '.ex', '.exs',
+  '.erl', '.hrl', '.clj', '.cljs', '.cljc', '.edn', '.hs', '.elm', '.sol', '.proto', '.graphql', '.gql',
+  '.fs', '.fsx', '.fsi', '.ml', '.mli', '.res', '.resi', '.zig', '.sv', '.svh', '.vhd', '.vhdl',
+  '.cmake', '.tcl', '.rkt'];
+// Deliberately excluded -- the extension names two languages with incompatible
+// comment syntax: .v (Verilog vs Coq), .m (Objective-C vs MATLAB). Opt in per
+// repo via the config `ext` list if you know which one you mean.
 
 // Extensionless files worth stamping, matched by basename.
-const NAMED_FILES = new Set(['Dockerfile', 'Makefile', 'Jenkinsfile', 'Vagrantfile', 'Procfile']);
+const NAMED_FILES = new Set(['Dockerfile', 'Containerfile', 'Makefile', 'GNUmakefile', 'Jenkinsfile',
+  'Vagrantfile', 'Procfile', 'Rakefile', 'Gemfile', 'Guardfile', 'Brewfile', 'Berksfile',
+  'Fastfile', 'Appfile', 'Podfile', 'CMakeLists.txt']);
 
 // ---------------------------------------------------------------- comment styles
 
-const BLOCK = { open: '/*!', line: ' * ', close: ' */' };
+const BLOCK = { open: '/*!', line: ' * ', close: ' */' };  // C-family; valid wherever // works too
 const HTML = { open: '<!--', line: '  ', close: '-->' };
+const PAREN = { open: '(*', line: ' * ', close: ' *)' };   // OCaml, F#, Pascal
+const HASH = { prefix: '# ' };
+const DASH = { prefix: '-- ' };                            // Haskell, Elm, Ada, SQL, Lua
+const SLASH = { prefix: '// ' };                           // Zig -- no block comment
+const SEMI = { prefix: '; ' };                             // Lisp / Clojure / Scheme
+const PCT = { prefix: '% ' };                              // Erlang
+const REM = { prefix: 'REM ' };
 const STYLES = {
-  '.js': BLOCK, '.jsx': BLOCK, '.ts': BLOCK, '.tsx': BLOCK, '.mjs': BLOCK, '.cjs': BLOCK,
+  '.js': BLOCK, '.jsx': BLOCK, '.ts': BLOCK, '.tsx': BLOCK, '.mjs': BLOCK, '.cjs': BLOCK, '.mts': BLOCK, '.cts': BLOCK,
   '.css': BLOCK, '.scss': BLOCK, '.sass': BLOCK, '.less': BLOCK, '.go': BLOCK, '.rs': BLOCK,
-  '.java': BLOCK, '.kt': BLOCK, '.swift': BLOCK, '.c': BLOCK, '.h': BLOCK, '.cpp': BLOCK,
-  '.hpp': BLOCK, '.cs': BLOCK, '.php': BLOCK, '.lua': { prefix: '-- ' }, '.sql': { prefix: '-- ' },
-  '.py': { prefix: '# ' }, '.rb': { prefix: '# ' }, '.sh': { prefix: '# ' }, '.bash': { prefix: '# ' },
-  '.zsh': { prefix: '# ' }, '.yml': { prefix: '# ' }, '.yaml': { prefix: '# ' }, '.toml': { prefix: '# ' },
-  '.html': HTML, '.htm': HTML, '.svg': HTML, '.vue': HTML, '.svelte': HTML, '.md': HTML,
-  '.bat': { prefix: 'REM ' }, '.cmd': { prefix: 'REM ' },
-  '.ps1': { prefix: '# ' }, '.psm1': { prefix: '# ' }, '.pl': { prefix: '# ' }, '.r': { prefix: '# ' },
-  '.tf': { prefix: '# ' }, '.tfvars': { prefix: '# ' }, '.hcl': { prefix: '# ' },
-  Dockerfile: { prefix: '# ' }, Makefile: { prefix: '# ' }, Procfile: { prefix: '# ' },
-  Vagrantfile: { prefix: '# ' }, Jenkinsfile: BLOCK,
+  '.java': BLOCK, '.kt': BLOCK, '.kts': BLOCK, '.swift': BLOCK, '.c': BLOCK, '.h': BLOCK, '.cpp': BLOCK,
+  '.hpp': BLOCK, '.cc': BLOCK, '.cxx': BLOCK, '.mm': BLOCK, '.cs': BLOCK, '.php': BLOCK,
+  '.dart': BLOCK, '.scala': BLOCK, '.sc': BLOCK, '.groovy': BLOCK, '.gradle': BLOCK, '.d': BLOCK,
+  '.sol': BLOCK, '.proto': BLOCK, '.res': BLOCK, '.resi': BLOCK, '.sv': BLOCK, '.svh': BLOCK,
+  '.lua': DASH, '.sql': DASH, '.hs': DASH, '.elm': DASH, '.vhd': DASH, '.vhdl': DASH,
+  '.py': HASH, '.pyi': HASH, '.rb': HASH, '.sh': HASH, '.bash': HASH, '.zsh': HASH, '.fish': HASH,
+  '.yml': HASH, '.yaml': HASH, '.toml': HASH, '.pl': HASH, '.pm': HASH, '.r': HASH, '.cr': HASH,
+  '.nim': HASH, '.jl': HASH, '.ex': HASH, '.exs': HASH, '.tf': HASH, '.tfvars': HASH, '.hcl': HASH,
+  '.graphql': HASH, '.gql': HASH, '.cmake': HASH, '.tcl': HASH, '.ps1': HASH, '.psm1': HASH,
+  '.html': HTML, '.htm': HTML, '.svg': HTML, '.vue': HTML, '.svelte': HTML, '.astro': HTML,
+  '.md': HTML, '.mdx': HTML,
+  '.fs': PAREN, '.fsx': PAREN, '.fsi': PAREN, '.ml': PAREN, '.mli': PAREN,
+  '.zig': SLASH,
+  '.clj': SEMI, '.cljs': SEMI, '.cljc': SEMI, '.edn': SEMI, '.rkt': SEMI,
+  '.erl': PCT, '.hrl': PCT,
+  '.bat': REM, '.cmd': REM,
+  Dockerfile: HASH, Containerfile: HASH, Makefile: HASH, GNUmakefile: HASH, Procfile: HASH,
+  Vagrantfile: HASH, Rakefile: HASH, Gemfile: HASH, Guardfile: HASH, Brewfile: HASH, Berksfile: HASH,
+  Fastfile: HASH, Appfile: HASH, Podfile: HASH, 'CMakeLists.txt': HASH, Jenkinsfile: BLOCK,
 };
 
 // Basename wins over extension, so `Dockerfile` and `Makefile` are handled.
@@ -60,16 +88,60 @@ const styleFor = rel => STYLES[path.basename(rel)] || STYLES[path.extname(rel)] 
 
 // ---------------------------------------------------------------- config + key
 
+const IGNORE_FILE = '.authormarkignore';
+
+// gitignore-lite: drop blank lines and #comments; each remaining line is an
+// ignore pattern understood by ignored() (exact path, dir prefix, or glob).
+function readIgnoreFile() {
+  const p = path.join(CWD, IGNORE_FILE);
+  if (!fs.existsSync(p)) return [];
+  return fs.readFileSync(p, 'utf8').split('\n')
+    .map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+}
+
 function loadConfig() {
   const p = path.join(CWD, CONFIG_FILE);
   if (!fs.existsSync(p)) die(`no ${CONFIG_FILE} here -- run:  authormark init`);
-  return JSON.parse(fs.readFileSync(p, 'utf8'));
+  const g = globalDefaults();
+  const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+  cfg.ignore = [...(cfg.ignore || []), ...readIgnoreFile()];
+  cfg.include = cfg.include || [];              // if non-empty, a file must match one glob
+  if (cfg.reuse === undefined) cfg.reuse = g.reuse ?? false;
+  if (cfg.maxBytes === undefined) cfg.maxBytes = g.maxBytes ?? 2 * 1024 * 1024;
+  return cfg;
 }
 
 // Machine-wide defaults, so every new repo gets the same identity without flags.
 function globalDefaults() {
   try { return JSON.parse(fs.readFileSync(path.join(os.homedir(), CONFIG_FILE), 'utf8')); }
   catch { return {}; }
+}
+
+// Glob: `*` matches a run of non-slash characters, `**` matches a run that may
+// include slashes, `?` matches one non-slash character. A trailing slash is
+// dropped. Anchored at the start; matches the path itself or a parent dir.
+function matchGlob(rel, pattern) {
+  const norm = rel.split(path.sep).join('/');
+  const pat = pattern.split(path.sep).join('/').replace(/\/+$/, '');
+  let rx = '';
+  for (let i = 0; i < pat.length; i++) {
+    const c = pat[i];
+    if (c === '*') {
+      if (pat[i + 1] === '*') {
+        // `**/` = zero or more leading path segments; bare `**` = anything.
+        if (pat[i + 2] === '/') { rx += '(?:.*/)?'; i += 2; } else { rx += '.*'; i += 1; }
+      } else {
+        rx += '[^/]*';
+      }
+    } else if (c === '?') {
+      rx += '[^/]';
+    } else if ('.+^${}()|[]\\'.includes(c)) {
+      rx += '\\' + c;
+    } else {
+      rx += c;
+    }
+  }
+  return new RegExp('^' + rx + '(/|$)').test(norm);
 }
 
 function keyPath(cfg) {
@@ -92,31 +164,102 @@ function fingerprint(key, body) {
   return crypto.createHmac('sha256', key).update(canonical(body)).digest('base64url').slice(0, 22);
 }
 
+// Unkeyed content digest for the Fingerprint: line in ed25519 mode -- it is only
+// a cheap "did the body change" marker; the Signature: line is the real proof.
+function contentDigest(body) {
+  return crypto.createHash('sha256').update(canonical(body)).digest('base64url').slice(0, 22);
+}
+
+const SIG_LABEL = 'Signature: AMK2.';
+
+// One object that hides the hmac-vs-ed25519 split from every command.
+//   fpFor(body)        -> string for the `Fingerprint:` line
+//   sigFor(body)       -> string for the `Signature:` line, or null (hmac / no key)
+//   verify(header,body)-> true | false | null   (null = can only presence-check)
+//   macFor(str)        -> proof string for a manifest / log entry, or null
+//   macVerify(str,mac) -> true | false | null
+function signer(cfg) {
+  const algo = cfg.algo === 'ed25519' ? 'ed25519' : 'hmac';
+
+  if (algo === 'ed25519') {
+    const pubs = [];
+    if (cfg.publicKey) {
+      try { pubs.push(crypto.createPublicKey({ key: Buffer.from(cfg.publicKey, 'base64'), format: 'der', type: 'spki' })); } catch {}
+    }
+    pubs.push(...loadArchivedPubs(cfg));
+    let priv = null;
+    const kp = keyPath(cfg);
+    if (fs.existsSync(kp)) {
+      try { priv = crypto.createPrivateKey(fs.readFileSync(kp, 'utf8')); } catch {}
+    }
+    const sign = str => crypto.sign(null, Buffer.from(str), priv).toString('base64url');
+    const anyPub = (str, macB64) => {
+      const m = Buffer.from(macB64, 'base64url');
+      return pubs.some(pk => { try { return crypto.verify(null, Buffer.from(str), pk, m); } catch { return false; } });
+    };
+    return {
+      algo,
+      fpFor: body => contentDigest(body),
+      sigFor: priv ? body => sign(canonical(body)) : null,
+      verify(header, body) {
+        const sig = header.match(/Signature: AMK2\.([A-Za-z0-9_-]+)/)?.[1];
+        const fp = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
+        if (!pubs.length || !sig) return fp ? (fp === contentDigest(body) ? null : false) : null;
+        return anyPub(canonical(body), sig);
+      },
+      macFor: priv ? sign : null,
+      macVerify: (str, mac) => (pubs.length ? anyPub(str, mac) : null),
+    };
+  }
+
+  const keys = fs.existsSync(keyPath(cfg)) ? loadAllKeys(cfg) : [];
+  const hmac = (k, s) => crypto.createHmac('sha256', k).update(s).digest('hex');
+  return {
+    algo,
+    fpFor: body => keys.length ? fingerprint(keys[0], body) : contentDigest(body),
+    sigFor: null,
+    verify(header, body) {
+      if (!keys.length) return null;
+      const fp = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
+      return keys.some(k => fp === fingerprint(k, body));
+    },
+    macFor: keys.length ? str => hmac(keys[0], str) : null,
+    macVerify(str, mac) {
+      if (!keys.length) return null;
+      return keys.some(k => hmac(k, str) === mac);
+    },
+  };
+}
+
 // ---------------------------------------------------------------- header build / strip
 
-function headerLines(cfg, fp) {
+function headerLines(cfg, fp, sig) {
+  const who = `${cfg.year} ${cfg.author}${cfg.email ? ` <${cfg.email}>` : ''}`;
   const l = [
     `${SENTINEL} ${NOREMOVE} (authorship watermark)`,
-    `Copyright (c) ${cfg.year} ${cfg.author}${cfg.email ? ` <${cfg.email}>` : ''}`,
+    `Copyright (c) ${who}`,
     `Author: ${cfg.github}`,
   ];
+  // REUSE-spec (reuse.software) machine-readable copyright line, opt-in via config.
+  if (cfg.reuse) l.push(`SPDX-FileCopyrightText: ${who}`);
   if (cfg.license) l.push(`SPDX-License-Identifier: ${cfg.license}`);
   l.push(`${FP_LABEL}${fp}`);
+  if (sig) l.push(`${SIG_LABEL}${sig}`);   // ed25519: verifiable with the public key alone
   return l;
 }
 
-function renderHeader(cfg, fp, style, zw) {
-  let lines = headerLines(cfg, fp);
+function renderHeader(cfg, fp, style, zw, sig) {
+  let lines = headerLines(cfg, fp, sig);
   if (zw) lines[0] += zwEncode(fp);
   if (style.prefix) return lines.map(l => style.prefix + l).join('\n') + '\n';
   return [style.open, ...lines.map(l => style.line + l), style.close].join('\n') + '\n';
 }
 
-// A header we wrote is at most 5 lines plus its delimiters; never scan further.
+// A header we wrote is at most 7 lines plus its delimiters; never scan further.
 // Without this bound a sentinel line whose `Fingerprint:` was deleted would make
 // the search run to EOF and stamp would then overwrite the whole file with a header.
-const HEADER_MAX_LINES = 8;
-const HEADER_FIELD = /(Copyright \(c\)|Author:|SPDX-License-Identifier:|Fingerprint: )/;
+const HEADER_MAX_LINES = 12;
+const HEADER_FIELD = /(Copyright \(c\)|Author:|SPDX-File(?:CopyrightText|Contributor):|SPDX-License-Identifier:|Fingerprint: |Signature: )/;
 
 // Returns {header, body} -- header is '' when the file is unstamped.
 function splitHeader(text) {
@@ -139,7 +282,11 @@ function splitHeader(text) {
       end = i;
       while (end + 1 < limit && HEADER_FIELD.test(lines[end + 1])) end++;
     }
-  } else if (end < lines.length - 1 && /^\s*(\*\/|-->)\s*$/.test(lines[end + 1])) end++;
+  } else {
+    // An ed25519 Signature: line sits just below Fingerprint: -- keep it with the header.
+    if (end + 1 < limit && lines[end + 1].includes(SIG_LABEL)) end++;
+    if (end < lines.length - 1 && /^\s*(\*\/|-->)\s*$/.test(lines[end + 1])) end++;
+  }
   return { header: lines.slice(start, end + 1).join('\n'), body: lines.slice(0, start).concat(lines.slice(end + 1)).join('\n'), at: start };
 }
 
@@ -200,10 +347,23 @@ function walk(target, exts, acc = []) {
 
 // Never enforce marks on generated output or vendored/third-party content.
 function ignored(rel, cfg) {
-  const segs = rel.split(path.sep).join('/').split('/');
+  const norm = rel.split(path.sep).join('/');
+  const segs = norm.split('/');
   if (segs.some(s => SKIP_DIRS.has(s))) return true;
   if (segs.slice(0, -1).some(s => s.startsWith('.') && s !== '.github')) return true;
-  return (cfg?.ignore || []).some(p => rel === p || rel.startsWith(p.replace(/\/+$/, '') + '/'));
+  return (cfg?.ignore || []).some(p =>
+    rel === p ||
+    norm === p ||
+    norm.startsWith(p.replace(/\/+$/, '') + '/') ||
+    ((p.includes('*') || p.includes('?')) && matchGlob(rel, p)));
+}
+
+// An `include` list (globs) turns collection into an allowlist: a file must
+// match at least one pattern to be stamped/checked. Empty list = stamp all.
+function includedBy(rel, cfg) {
+  const inc = cfg?.include || [];
+  if (inc.length === 0) return true;
+  return inc.some(p => matchGlob(rel, p) || rel === p || rel.split(path.sep).join('/') === p);
 }
 
 function collect(paths, exts, cfg) {
@@ -213,7 +373,7 @@ function collect(paths, exts, cfg) {
     if (!fs.existsSync(t)) { warn(`skip (missing): ${t}`); continue; }
     for (const f of walk(t, exts)) {
       const rel = path.relative(CWD, f);
-      if (!ignored(rel, cfg)) files.add(rel);
+      if (!ignored(rel, cfg) && includedBy(rel, cfg)) files.add(rel);
     }
   }
   return [...files].sort();
@@ -227,33 +387,59 @@ function cmdInit(args) {
   const email = flag(args, '--email') || g.email || tryGit('user.email') || '';
   const github = flag(args, '--github') || g.github || '';
   const license = flag(args, '--license') || g.license || 'MIT';
-  const cfg = { author, email, github, year: new Date().getFullYear(), license, keyFile: '~/.authormark.key', ignore: [] };
-  fs.writeFileSync(path.join(CWD, CONFIG_FILE), JSON.stringify(cfg, null, 2) + '\n');
+  const ed25519 = args.includes('--ed25519') || g.algo === 'ed25519';
+  const cfg = {
+    author, email, github, year: new Date().getFullYear(), license,
+    keyFile: '~/.authormark.key',
+    algo: ed25519 ? 'ed25519' : 'hmac',
+    ignore: [], include: [],
+    reuse: flag(args, '--reuse') === 'true' || args.includes('--reuse') || g.reuse || false,
+    maxBytes: g.maxBytes ?? 2 * 1024 * 1024,
+  };
   const kp = keyPath(cfg);
-  if (fs.existsSync(kp)) {
+  if (ed25519) {
+    if (fs.existsSync(kp)) {
+      log(`key kept: ${kp} (already exists -- never regenerate, old signatures would break)`);
+      try {
+        const pub = crypto.createPublicKey(crypto.createPrivateKey(fs.readFileSync(kp, 'utf8')));
+        cfg.publicKey = pub.export({ type: 'spki', format: 'der' }).toString('base64');
+      } catch { die(`existing ${kp} is not an ed25519 private key -- move it aside first`); }
+    } else {
+      const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+      fs.writeFileSync(kp, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+      cfg.publicKey = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+      log(`ed25519 keypair created: private ${kp} (chmod 600 -- BACK THIS UP), public key embedded in ${CONFIG_FILE}`);
+    }
+  } else if (fs.existsSync(kp)) {
     log(`key kept: ${kp} (already exists -- never regenerate, old fingerprints would break)`);
   } else {
     fs.writeFileSync(kp, crypto.randomBytes(32).toString('hex') + '\n', { mode: 0o600 });
     log(`key created: ${kp}  (chmod 600 -- BACK THIS UP, it is your proof of authorship)`);
   }
-  log(`config written: ${CONFIG_FILE}`);
+  fs.writeFileSync(path.join(CWD, CONFIG_FILE), JSON.stringify(cfg, null, 2) + '\n');
+  log(`config written: ${CONFIG_FILE}${ed25519 ? '  (algo: ed25519 -- CI verifies with the public key, no secret needed)' : ''}`);
   if (!args.includes('--quiet')) log(`\nnext:  authormark stamp app components lib`);
 }
 
 function cmdStamp(args) {
-  const cfg = loadConfig(), key = loadKey(cfg);
+  const cfg = loadConfig();
+  const s = signer(cfg);
+  if (cfg.algo === 'ed25519' && !s.sigFor) die(`ed25519 mode but no usable private key at ${keyPath(cfg)}`);
+  if (cfg.algo !== 'ed25519') loadKey(cfg);  // fail early with the familiar message if the hmac key is gone
   const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
   const zw = args.includes('--zw');
   const dry = args.includes('--dry');
   const files = collect(positional(args), exts, cfg);
-  let added = 0, refreshed = 0, same = 0;
+  let added = 0, refreshed = 0, same = 0, skipped = 0;
 
   for (const rel of files) {
+    if (tooBig(rel, cfg)) { skipped++; continue; }
     const orig = fs.readFileSync(rel, 'utf8');
     const style = styleFor(rel);
     const { header, body } = splitHeader(orig);
-    const fp = fingerprint(key, body);
-    const next = renderHeader(cfg, fp, style, zw);
+    const fp = s.fpFor(body);
+    const sig = s.sigFor ? s.sigFor(body) : null;
+    const next = renderHeader(cfg, fp, style, zw, sig);
     if (header && header + '\n' === next.replace(/\n$/, '') + '\n') { same++; continue; }
     const at = insertIndex(body);
     const out = body.slice(0, at) + next + body.slice(at);
@@ -262,15 +448,62 @@ function cmdStamp(args) {
     header ? refreshed++ : added++;
     if (dry) log(`would ${header ? 'refresh' : 'stamp'}: ${rel}`);
   }
-  log(`${dry ? '[dry] ' : ''}stamped ${added}, refreshed ${refreshed}, unchanged ${same}  (${files.length} files)`);
+  log(`${dry ? '[dry] ' : ''}stamped ${added}, refreshed ${refreshed}, unchanged ${same}` +
+    `${skipped ? `, skipped ${skipped} (too large)` : ''}  (${files.length} files)`);
+}
+
+// Files above cfg.maxBytes are left alone -- a watermark in a giant generated
+// blob or a checked-in asset is noise, and reading it wastes memory.
+function tooBig(rel, cfg) {
+  try { return fs.statSync(rel).size > (cfg?.maxBytes ?? 2 * 1024 * 1024); }
+  catch { return false; }
+}
+
+// Streamed SHA-256 so `seal` can cover files of any size.
+function hashFile(rel) {
+  const h = crypto.createHash('sha256');
+  const fd = fs.openSync(rel, 'r');
+  const buf = Buffer.alloc(1 << 20);
+  let bytes = 0, n;
+  try {
+    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) { h.update(buf.subarray(0, n)); bytes += n; }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return { hash: h.digest('hex'), bytes };
+}
+
+// Deliberate, auditable removal -- for a licence change or upstreaming a file.
+// Never call this to "fix" a stale fingerprint; re-stamp instead.
+function cmdUnstamp(args) {
+  const cfg = fs.existsSync(path.join(CWD, CONFIG_FILE)) ? loadConfig() : { ignore: [] };
+  const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
+  const dry = !args.includes('--force');
+  const files = collect(positional(args), exts, cfg);
+  let removed = 0, clean = 0;
+  for (const rel of files) {
+    const orig = fs.readFileSync(rel, 'utf8');
+    const { header, body } = splitHeader(orig);
+    if (!header) { clean++; continue; }
+    // splitHeader already carries the zero-width mark off with the header block;
+    // just tidy the blank line it leaves at the top of the file.
+    const out = body.replace(/^\n/, '');
+    if (!dry) fs.writeFileSync(rel, out);
+    removed++;
+    log(`${dry ? 'would remove' : 'removed'} watermark: ${rel}`);
+  }
+  log(`${dry ? '[dry] ' : ''}removed ${removed}, already clean ${clean}  (${files.length} files)`);
+  if (dry && removed) log(`\nre-run with --force to write.`);
 }
 
 function cmdCheck(args) {
   const cfg = loadConfig();
-  // CI has no access to the secret key, so fall back to presence-only checking
-  // there: it still blocks a stripped header, it just can't validate the HMAC.
-  const presence = args.includes('--presence') || !fs.existsSync(keyPath(cfg));
-  const key = presence ? null : loadKey(cfg);
+  // ed25519 verifies from the public key in config (works in CI with no secret).
+  // hmac needs the local key; without it we can only presence-check.
+  const forcePresence = args.includes('--presence') ||
+    (cfg.algo !== 'ed25519' && !fs.existsSync(keyPath(cfg)));
+  const s = forcePresence ? null : signer(cfg);
+  const mode = forcePresence ? 'presence' : (cfg.algo === 'ed25519' ? 'ed25519' : 'hmac');
   const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
   let files;
   if (args.includes('--staged')) {
@@ -285,84 +518,287 @@ function cmdCheck(args) {
     files = collect(positional(args), exts, cfg);
   }
   const missing = [], tampered = [];
+  let skipped = 0;
   for (const rel of files) {
+    // Stay consistent with stamp: it never marks files this large, so check
+    // must not demand a mark on them either.
+    if (tooBig(rel, cfg)) { skipped++; continue; }
     const text = fs.readFileSync(rel, 'utf8');
     const { header, body } = splitHeader(text);
     if (!header) { missing.push(rel); continue; }
-    if (!key) continue;
-    const claimed = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
-    if (claimed !== fingerprint(key, body)) tampered.push(rel);
+    if (!s) continue;                       // presence-only
+    if (s.verify(header, body) === false) tampered.push(rel);
   }
+  const ok = missing.length === 0 && tampered.length === 0;
+
+  if (args.includes('--json')) {
+    process.stdout.write(JSON.stringify({
+      ok, mode,
+      total: files.length, skipped, missing, stale: tampered,
+    }, null, 2) + '\n');
+    if (!ok) process.exit(1);
+    return;
+  }
+
   for (const f of missing) console.error(`  MISSING watermark: ${f}`);
-  for (const f of tampered) console.error(`  STALE fingerprint:  ${f}  (re-run: authormark stamp ${f})`);
-  if (missing.length || tampered.length) {
-    console.error(`\nauthormark: ${missing.length} unmarked, ${tampered.length} stale of ${files.length}.`);
+  for (const f of tampered) console.error(`  ${mode === 'ed25519' ? 'BAD SIGNATURE' : 'STALE fingerprint'}: ${f}  (re-run: authormark stamp ${f})`);
+  if (!ok) {
+    console.error(`\nauthormark: ${missing.length} unmarked, ${tampered.length} ${mode === 'ed25519' ? 'unverifiable' : 'stale'} of ${files.length}.`);
     process.exit(1);
   }
-  log(`authormark: all ${files.length} files carry a watermark${presence ? ' (presence only -- no key here, fingerprints not verified).' : ' with a valid fingerprint.'}`);
+  const tail = mode === 'presence' ? ' (presence only -- fingerprints not verified).'
+    : mode === 'ed25519' ? ' with a valid ed25519 signature.'
+    : ' with a valid fingerprint.';
+  log(`authormark: all ${files.length} files carry a watermark${tail}`);
 }
 
 function cmdSeal(args) {
-  const cfg = loadConfig(), key = loadKey(cfg);
+  const cfg = loadConfig();
+  const s = signer(cfg);
+  if (!s.macFor) die(cfg.algo === 'ed25519'
+    ? `ed25519 mode but no usable private key at ${keyPath(cfg)}`
+    : `secret key missing at ${keyPath(cfg)} -- run:  authormark init`);
   const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
   const files = collect(positional(args), exts, cfg);
   const entries = files.map(rel => {
-    const buf = fs.readFileSync(rel);
-    return { path: rel, sha256: crypto.createHash('sha256').update(buf).digest('hex'), bytes: buf.length };
+    // Seal every collected file regardless of size, but hash big ones in
+    // chunks so a large asset can't blow the heap.
+    const { hash, bytes } = hashFile(rel);
+    return { path: rel, sha256: hash, bytes };
   });
   const digest = crypto.createHash('sha256')
     .update(entries.map(e => `${e.sha256}  ${e.path}`).join('\n')).digest('hex');
   const manifest = {
     schema: 'authormark/manifest/1',
+    algo: s.algo,
     author: cfg.author, email: cfg.email, github: cfg.github,
     sealedAt: new Date().toISOString(),
     fileCount: entries.length,
     digest,
-    proof: crypto.createHmac('sha256', key).update(digest).digest('hex'),
+    proof: s.macFor(digest),
     files: entries,
   };
   fs.writeFileSync(path.join(CWD, MANIFEST_FILE), JSON.stringify(manifest, null, 2) + '\n');
+  const chain = appendChain(s, digest);
   log(`sealed ${entries.length} files -> ${MANIFEST_FILE}`);
   log(`digest: ${digest}`);
+  log(`chain:  ${LOG_FILE} seq ${chain.seq} (prev ${chain.prev.slice(0, 12)}…)`);
   log(`\nnotarize it (free, public, timestamped):`);
-  log(`  gpg --armor --detach-sign ${MANIFEST_FILE}      # if you have a GPG key`);
+  log(`  authormark timestamp                            # RFC 3161 TSA token (needs openssl)`);
+  log(`  authormark attest                               # SLSA provenance statement`);
   log(`  ots stamp ${MANIFEST_FILE}                      # OpenTimestamps -> bitcoin-anchored proof`);
 }
 
+// ---------------------------------------------------------------- tamper-evident log
+
+// Every seal appends one line to AUTHORSHIP.log. `prev` is the SHA-256 of the
+// entire file as it stood before the append, so altering or dropping any past
+// line breaks `prev` on every line after it. `mac` binds the entry to the key
+// (HMAC in hmac mode, an ed25519 signature otherwise).
+function appendChain(s, digest) {
+  const p = path.join(CWD, LOG_FILE);
+  const before = fs.existsSync(p) ? fs.readFileSync(p) : Buffer.alloc(0);
+  const prev = before.length ? crypto.createHash('sha256').update(before).digest('hex') : '0'.repeat(64);
+  const seq = before.length ? before.toString('utf8').split('\n').filter(Boolean).length : 0;
+  const rec = { seq, ts: new Date().toISOString(), digest, prev };
+  rec.mac = s.macFor(`${rec.seq}\n${rec.ts}\n${rec.digest}\n${rec.prev}`);
+  fs.appendFileSync(p, JSON.stringify(rec) + '\n');
+  return rec;
+}
+
+function cmdChain() {
+  const cfg = loadConfig();
+  const s = signer(cfg);
+  const p = path.join(CWD, LOG_FILE);
+  if (!fs.existsSync(p)) die(`no ${LOG_FILE} here -- run:  authormark seal`);
+  const lines = fs.readFileSync(p, 'utf8').split('\n').filter(Boolean);
+  let broken = 0, unsigned = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const rec = JSON.parse(lines[i]);
+    const want = i === 0 ? '0'.repeat(64)
+      : crypto.createHash('sha256').update(lines.slice(0, i).join('\n') + '\n').digest('hex');
+    const linkOk = rec.prev === want;
+    const macRes = s.macVerify(`${rec.seq}\n${rec.ts}\n${rec.digest}\n${rec.prev}`, rec.mac);
+    if (!linkOk) broken++;
+    if (macRes === false) unsigned++;
+    log(`  #${rec.seq}  ${rec.ts}  ${rec.digest.slice(0, 16)}…  ${linkOk ? 'link OK' : 'LINK BROKEN'}${macRes === null ? '' : (macRes ? ' / mac OK' : ' / MAC BAD')}`);
+  }
+  log(`\n${lines.length} entries, ${broken} broken link(s), ${unsigned} bad mac(s).`);
+  if (broken || unsigned) process.exit(1);
+}
+
+// ---------------------------------------------------------------- RFC 3161 timestamp
+
+async function cmdTimestamp(args) {
+  const file = positional(args)[0] || MANIFEST_FILE;
+  if (!fs.existsSync(file)) die(`no ${file} -- run:  authormark seal`);
+  const tsa = flag(args, '--tsa') || 'http://timestamp.digicert.com';
+  try { execFileSync('openssl', ['version'], { stdio: 'ignore' }); }
+  catch { die('openssl not found -- it builds and verifies the RFC 3161 request'); }
+
+  const tsq = `${file}.tsq`, tsr = `${file}.tsr`;
+  execFileSync('openssl', ['ts', '-query', '-data', file, '-sha256', '-cert', '-no_nonce', '-out', tsq]);
+  const res = await fetch(tsa, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/timestamp-query' },
+    body: fs.readFileSync(tsq),
+  });
+  if (!res.ok) die(`TSA ${tsa} returned HTTP ${res.status}`);
+  fs.writeFileSync(tsr, Buffer.from(await res.arrayBuffer()));
+  fs.rmSync(tsq, { force: true });
+  log(`timestamp token -> ${tsr}  (from ${tsa})`);
+  log(`verify:  openssl ts -reply -in ${tsr} -text | grep -E 'Time stamp|Hash'`);
+}
+
+// ---------------------------------------------------------------- SLSA attestation
+
+function cmdAttest(args) {
+  const cfg = loadConfig();
+  const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
+  const files = collect(positional(args), exts, cfg);
+  const subject = files.map(rel => ({ name: rel, digest: { sha256: hashFile(rel).hash } }));
+  const now = new Date().toISOString();
+  const statement = {
+    _type: 'https://in-toto.io/Statement/v1',
+    subject,
+    predicateType: 'https://slsa.dev/provenance/v1',
+    predicate: {
+      buildDefinition: {
+        buildType: 'https://github.com/Srinivasan-78/authormark-watch/attest/v1',
+        externalParameters: { author: cfg.author, github: cfg.github, license: cfg.license || null },
+        internalParameters: {},
+        resolvedDependencies: [],
+      },
+      runDetails: {
+        builder: { id: cfg.github || 'https://github.com/Srinivasan-78/authormark-watch' },
+        metadata: { invocationId: crypto.randomUUID(), startedOn: now, finishedOn: now },
+      },
+    },
+  };
+  const out = flag(args, '-o') || ATTEST_FILE;
+  fs.writeFileSync(path.join(CWD, out), JSON.stringify(statement) + '\n');
+  log(`wrote SLSA provenance for ${subject.length} file(s) -> ${out}`);
+  if (args.includes('--sign')) {
+    try {
+      execFileSync('cosign', ['sign-blob', '--yes', '--output-signature', `${out}.sig`, path.join(CWD, out)], { stdio: 'inherit' });
+      log(`cosign signature -> ${out}.sig`);
+    } catch {
+      warn('cosign not available or sign failed -- statement written unsigned');
+    }
+  } else {
+    log(`sign it:  cosign sign-blob --yes --output-signature ${out}.sig ${out}`);
+  }
+}
+
+// ---------------------------------------------------------------- key rotation
+
+function cmdRotate(args) {
+  const cfg = loadConfig();
+  const kp = keyPath(cfg);
+  if (!fs.existsSync(kp)) die(`no key at ${kp} -- run:  authormark init`);
+  const dir = kp + '.d';
+  fs.mkdirSync(dir, { recursive: true });
+  const tag = new Date().toISOString().replace(/[:.]/g, '-');
+  const archived = path.join(dir, `key-${tag}`);
+  fs.copyFileSync(kp, archived);
+
+  if (args.includes('--keep')) {
+    log(`archived a copy of the current key to ${archived} (key unchanged)`);
+    return;
+  }
+
+  if (cfg.algo === 'ed25519') {
+    // Stash the retiring public key so signatures made under it still verify.
+    if (cfg.publicKey) fs.writeFileSync(path.join(dir, `pub-${tag}.b64`), cfg.publicKey + '\n');
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+    fs.writeFileSync(kp, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+    cfg.publicKey = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    // Rewrite config, preserving key order but with the fresh public key.
+    fs.writeFileSync(path.join(CWD, CONFIG_FILE), JSON.stringify(cfg, null, 2) + '\n');
+    log(`rotated ed25519 keypair: new private ${kp}, public key updated in ${CONFIG_FILE}`);
+  } else {
+    fs.writeFileSync(kp, crypto.randomBytes(32).toString('hex') + '\n', { mode: 0o600 });
+    log(`rotated: new key at ${kp}, previous archived to ${archived}`);
+  }
+  log(`old marks still verify (archived keys/pubkeys are tried on check/scan/chain).`);
+  log(`re-stamp to move everything to the new key:  authormark stamp .`);
+}
+
+// Archived ed25519 public keys (base64 DER), newest first.
+function loadArchivedPubs(cfg) {
+  const dir = keyPath(cfg) + '.d';
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const f of fs.readdirSync(dir).sort().reverse()) {
+    if (!f.startsWith('pub-')) continue;
+    try {
+      out.push(crypto.createPublicKey({
+        key: Buffer.from(fs.readFileSync(path.join(dir, f), 'utf8').trim(), 'base64'),
+        format: 'der', type: 'spki',
+      }));
+    } catch {}
+  }
+  return out;
+}
+
+// Current key first, then any archived under ~/.authormark.key.d/, newest first.
+function loadAllKeys(cfg) {
+  const keys = [loadKey(cfg)];
+  const dir = keyPath(cfg) + '.d';
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir).sort().reverse()) {
+      if (!f.startsWith('key-')) continue;
+      try { keys.push(Buffer.from(fs.readFileSync(path.join(dir, f), 'utf8').trim(), 'hex')); } catch {}
+    }
+  }
+  return keys;
+}
+
 function cmdVerify(args) {
-  const cfg = loadConfig(), key = loadKey(cfg);
+  const cfg = loadConfig();
+  const s = signer(cfg);
   const file = positional(args)[0] || MANIFEST_FILE;
   const m = JSON.parse(fs.readFileSync(file, 'utf8'));
   const digest = crypto.createHash('sha256')
     .update(m.files.map(e => `${e.sha256}  ${e.path}`).join('\n')).digest('hex');
-  const proofOk = m.proof === crypto.createHmac('sha256', key).update(digest).digest('hex');
+  const proofRes = s.macVerify(m.digest, m.proof);
   log(`manifest digest: ${digest === m.digest ? 'OK' : 'MISMATCH'}`);
-  log(`your HMAC proof: ${proofOk ? 'OK -- this manifest was sealed with your key' : 'FAIL -- not sealed by your key'}`);
+  log(`${m.algo === 'ed25519' ? 'ed25519 proof' : 'HMAC proof'}: ${
+    proofRes === null ? 'SKIPPED -- no key/pubkey available'
+    : proofRes ? 'OK -- sealed with your key' : 'FAIL -- not sealed by your key'}`);
   let changed = 0, missing = 0;
   for (const e of m.files) {
     if (!fs.existsSync(e.path)) { missing++; console.error(`  gone:    ${e.path}`); continue; }
-    const h = crypto.createHash('sha256').update(fs.readFileSync(e.path)).digest('hex');
-    if (h !== e.sha256) { changed++; console.error(`  changed: ${e.path}`); }
+    if (hashFile(e.path).hash !== e.sha256) { changed++; console.error(`  changed: ${e.path}`); }
   }
   log(`${m.fileCount} sealed, ${changed} changed, ${missing} gone since ${m.sealedAt}`);
-  if (!proofOk || digest !== m.digest) process.exit(1);
+  if (proofRes === false || digest !== m.digest || changed > 0) process.exit(1);
 }
 
 function cmdScan(args) {
   const cfg = fs.existsSync(path.join(CWD, CONFIG_FILE)) ? loadConfig() : null;
-  const key = cfg && fs.existsSync(keyPath(cfg)) ? loadKey(cfg) : null;
+  const keys = cfg && fs.existsSync(keyPath(cfg)) ? loadAllKeys(cfg) : [];
   for (const f of positional(args)) {
     log(`\n=== ${f}`);
     const buf = fs.readFileSync(f);
     const ext = path.extname(f).toLowerCase();
-    if (ext === '.png') { scanPng(buf, key); continue; }
+    if (ext === '.png') { scanPng(buf, keys[0] || null); continue; }
     if (ext === '.jpg' || ext === '.jpeg') { scanJpeg(buf); continue; }
+    if (MEDIA_EXTS.has(ext)) {
+      const raw = buf.toString('latin1');
+      const hit = ext === '.svg' ? /<metadata[^>]*id="authormark"/.test(raw) : raw.includes(SENTINEL);
+      log(`  ${ext.slice(1).toUpperCase()} metadata mark: ${hit ? 'present' : 'not found'}`);
+      continue;
+    }
     const text = buf.toString('utf8');
     const { header, body } = splitHeader(text);
     if (header) {
       log(header.split('\n').map(l => '  ' + l.trim()).join('\n'));
       const claimed = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
-      if (key) log(`  -> fingerprint ${claimed === fingerprint(key, body) ? 'VALID for your key' : 'does NOT match current content'}`);
+      if (keys.length) {
+        const hit = keys.findIndex(k => claimed === fingerprint(k, body));
+        log(`  -> fingerprint ${hit === 0 ? 'VALID for your current key' : hit > 0 ? `VALID for archived key #${hit}` : 'does NOT match current content'}`);
+      }
     } else log('  no visible header');
     const zw = zwDecode(text);
     if (zw.length) log(`  hidden zero-width mark(s): ${zw.join(', ')}`);
@@ -710,7 +1146,8 @@ function cmdImage(args) {
       log(`${f} -> ${out}  [EXIF Artist/Copyright + XMP + COM]  (no pixel marks: JPEG is lossy -- convert to PNG for those)`);
       continue;
     }
-    if (ext !== '.png') { warn(`skip ${f} (only .png and .jpg supported)`); continue; }
+    if (MEDIA_EXTS.has(ext)) { markMedia(f, out, cfg); continue; }
+    if (ext !== '.png') { warn(`skip ${f} (unsupported: ${ext || 'no extension'})`); continue; }
 
     const img = decodePng(fs.readFileSync(f));
     const { width: W, height: H, rgba } = img;
@@ -745,6 +1182,374 @@ function cmdImage(args) {
     fs.writeFileSync(out, encodePng({ width: W, height: H, rgba, hasAlpha: img.hasAlpha, texts }));
     log(`${f} -> ${out}  [${W}x${H}] metadata${visible ? ' + visible' : ''}${noStego ? '' : ` + hidden x${copies}`}`);
   }
+}
+
+// ---------------------------------------------------------------- other media carriers
+// Metadata-level marks only (no pixel/DCT stego). Enough to assert authorship
+// and survive a plain copy; a re-encode by an editor can still strip them --
+// `authormark attack` shows exactly what survives what.
+
+const MEDIA_EXTS = new Set(['.gif', '.svg', '.mp3', '.webp', '.mp4', '.m4v', '.m4a', '.mov', '.pdf']);
+
+function markMedia(f, out, cfg) {
+  const ext = path.extname(f).toLowerCase();
+  const buf = fs.readFileSync(f);
+  const rights = `${SENTINEL} ${NOREMOVE}. Copyright (c) ${cfg.year} ${cfg.author}. ${cfg.github}`;
+  let marked;
+  if (ext === '.gif') marked = gifMark(buf, rights);
+  else if (ext === '.svg') marked = svgMark(buf, cfg, rights);
+  else if (ext === '.mp3') marked = mp3Mark(buf, cfg, rights);
+  else if (ext === '.webp') marked = webpMark(buf, cfg, rights);
+  else if (['.mp4', '.m4v', '.m4a', '.mov'].includes(ext)) marked = mp4Mark(buf, cfg);
+  else if (ext === '.pdf') marked = pdfMark(buf, cfg, rights);
+  else return false;
+  fs.writeFileSync(out, marked);
+  log(`${f} -> ${out}  [${ext.slice(1).toUpperCase()} metadata mark]`);
+  return true;
+}
+
+// GIF89a: a Comment Extension (0x21 0xFE ... 0x00) right after the header +
+// Logical Screen Descriptor + optional Global Color Table.
+function gifMark(buf, text) {
+  if (buf.toString('ascii', 0, 3) !== 'GIF') die('not a GIF');
+  let p = 13;
+  const packed = buf[10];
+  if (packed & 0x80) p += 3 * (2 ** ((packed & 7) + 1));   // skip GCT
+  const clean = [];
+  // Drop any comment extension we previously wrote, keep everything else.
+  let q = p;
+  while (q < buf.length && buf[q] === 0x21 && buf[q + 1] === 0xFE) {
+    let r = q + 2;
+    while (buf[r] && r < buf.length) r += 1 + buf[r];
+    r++;
+    if (buf.toString('latin1', q + 3, q + 3 + SENTINEL.length) !== SENTINEL) { clean.push(buf.subarray(q, r)); }
+    q = r;
+  }
+  const body = Buffer.from(text, 'latin1');
+  const subs = [];
+  for (let i = 0; i < body.length; i += 255) {
+    const chunk = body.subarray(i, i + 255);
+    subs.push(Buffer.from([chunk.length]), chunk);
+  }
+  const ext = Buffer.concat([Buffer.from([0x21, 0xFE]), ...subs, Buffer.from([0x00])]);
+  return Buffer.concat([buf.subarray(0, p), ext, ...clean, buf.subarray(q)]);
+}
+
+// SVG: a real <metadata> element with Dublin Core, just inside <svg …>.
+function svgMark(buf, cfg, rights) {
+  // Only ever replace our own <metadata id="authormark">; leave the author's alone.
+  let s = buf.toString('utf8').replace(/\s*<metadata\b[^>]*\bid="authormark"[\s\S]*?<\/metadata>\s*/i, '');
+  const md = `<metadata id="authormark">` +
+    `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/">` +
+    `<rdf:Description><dc:creator>${esc(cfg.author)}</dc:creator>` +
+    `<dc:rights>${esc(rights)}</dc:rights><dc:identifier>${esc(cfg.github)}</dc:identifier></rdf:Description>` +
+    `</rdf:RDF></metadata>`;
+  const m = s.match(/<svg\b[^>]*>/i);
+  if (!m) die('no <svg> root element');
+  const at = m.index + m[0].length;
+  return Buffer.from(s.slice(0, at) + '\n  ' + md + s.slice(at), 'utf8');
+}
+
+// ID3v2.4 tag prepended to the MP3 (skips/replaces an existing leading ID3 tag).
+function mp3Mark(buf, cfg, rights) {
+  let start = 0;
+  if (buf.toString('latin1', 0, 3) === 'ID3') {
+    const sz = (buf[6] << 21) | (buf[7] << 14) | (buf[8] << 7) | buf[9];
+    start = 10 + sz + ((buf[5] & 0x10) ? 10 : 0);
+  }
+  const synch = n => Buffer.from([(n >> 21) & 0x7f, (n >> 14) & 0x7f, (n >> 7) & 0x7f, n & 0x7f]);
+  const textFrame = (id, val) => {
+    const data = Buffer.concat([Buffer.from([0x03]), Buffer.from(val, 'utf8')]);   // 0x03 = UTF-8
+    return Buffer.concat([Buffer.from(id, 'latin1'), synch(data.length), Buffer.from([0, 0]), data]);
+  };
+  const frames = Buffer.concat([
+    textFrame('TCOP', `${cfg.year} ${cfg.author}`),
+    textFrame('TPE1', cfg.author),
+    textFrame('TENC', 'authormark/1'),
+    textFrame('TXXX', `authormark\x00${rights}`),
+  ]);
+  const tag = Buffer.concat([Buffer.from('ID3\x04\x00\x00', 'latin1'), synch(frames.length), frames]);
+  return Buffer.concat([tag, buf.subarray(start)]);
+}
+
+// WebP: append an "XMP " chunk (and flip the VP8X XMP flag when the file is
+// already extended). Simple VP8/VP8L files are left with a trailing chunk that
+// compliant readers still pick up.
+function webpMark(buf, cfg, rights) {
+  if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WEBP') die('not a WebP');
+  const xmp = Buffer.from(
+    `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
+    `<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/">` +
+    `<dc:creator>${esc(cfg.author)}</dc:creator><dc:rights>${esc(rights)}</dc:rights>` +
+    `<dc:identifier>${esc(cfg.github)}</dc:identifier></rdf:Description></rdf:RDF></x:xmpmeta>`, 'utf8');
+  const chunks = [];
+  let p = 12;
+  while (p + 8 <= buf.length) {
+    const fourcc = buf.toString('ascii', p, p + 4);
+    const size = buf.readUInt32LE(p + 4);
+    const end = p + 8 + size + (size & 1);
+    if (fourcc !== 'XMP ') chunks.push(buf.subarray(p, Math.min(end, buf.length)));
+    p = end;
+  }
+  const xmpChunk = Buffer.concat([
+    Buffer.from('XMP '), (() => { const b = Buffer.alloc(4); b.writeUInt32LE(xmp.length); return b; })(),
+    xmp, xmp.length & 1 ? Buffer.from([0]) : Buffer.alloc(0),
+  ]);
+  if (chunks[0] && chunks[0].toString('ascii', 0, 4) === 'VP8X') chunks[0][8 + 0] |= 0x04;   // XMP flag
+  const bodyBuf = Buffer.concat([...chunks, xmpChunk]);
+  const riff = Buffer.alloc(12);
+  riff.write('RIFF', 0, 'ascii'); riff.writeUInt32LE(4 + bodyBuf.length, 4); riff.write('WEBP', 8, 'ascii');
+  return Buffer.concat([riff, bodyBuf]);
+}
+
+// ISO-BMFF / QuickTime: a moov/udta with ©cpy ©ART ©nam ©cmt atoms.
+function mp4Mark(buf, cfg) {
+  const box = (type, payload) => {
+    const b = Buffer.alloc(8); b.writeUInt32BE(payload.length + 8, 0); b.write(type, 4, 'latin1');
+    return Buffer.concat([b, payload]);
+  };
+  const cAtom = (type, text) => {
+    const t = Buffer.from(text, 'utf8');
+    const d = Buffer.alloc(4); d.writeUInt16BE(t.length, 0); d.writeUInt16BE(0x55c4, 2);   // len, lang(und)
+    return box(type, Buffer.concat([d, t]));
+  };
+  // locate top-level moov
+  let p = 0, moovStart = -1, moovSize = 0;
+  while (p + 8 <= buf.length) {
+    let size = buf.readUInt32BE(p);
+    const type = buf.toString('latin1', p + 4, p + 8);
+    if (size === 1) size = Number(buf.readBigUInt64BE(p + 8));
+    if (size < 8) break;
+    if (type === 'moov') { moovStart = p; moovSize = size; break; }
+    p += size;
+  }
+  if (moovStart === -1) die('no moov box -- streamed/fragmented MP4 not supported');
+  const udta = box('udta', Buffer.concat([
+    cAtom('\xa9cpy', `${cfg.year} ${cfg.author}`),
+    cAtom('\xa9ART', cfg.author),
+    cAtom('\xa9nam', `${SENTINEL} ${NOREMOVE}`),
+    cAtom('\xa9cmt', `${cfg.github}`),
+  ]));
+  const oldMoov = buf.subarray(moovStart, moovStart + moovSize);
+  const newMoovInner = Buffer.concat([oldMoov.subarray(8), udta]);
+  const newMoov = box('moov', newMoovInner);
+  return Buffer.concat([buf.subarray(0, moovStart), newMoov, buf.subarray(moovStart + moovSize)]);
+}
+
+// PDF incremental update: append an /Info dict + XMP stream, a catalog override
+// pointing at the XMP, a fresh xref section and a trailer chaining to /Prev.
+function pdfMark(buf, cfg, rights) {
+  const s = buf.toString('latin1');
+  if (!s.startsWith('%PDF-')) die('not a PDF');
+  const lastXref = s.lastIndexOf('startxref');
+  if (lastXref === -1) die('no startxref -- linearised/broken PDF');
+  const prev = parseInt(s.slice(lastXref + 9).trim(), 10);
+  const sizeM = s.match(/\/Size\s+(\d+)/g);
+  let size = sizeM ? Math.max(...sizeM.map(x => parseInt(x.replace(/\D/g, ''), 10))) : 0;
+  const rootM = s.match(/\/Root\s+(\d+)\s+(\d+)\s+R/);
+  if (!rootM || !size) die('cannot locate /Root or /Size in trailer');
+  const rootNum = rootM[1];
+
+  let out = buf.length && buf[buf.length - 1] === 0x0a ? Buffer.from(buf) : Buffer.concat([buf, Buffer.from('\n')]);
+  const off = {};
+  const infoNum = ++size, xmpNum = ++size;
+
+  const xmp = `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>` +
+    `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
+    `<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator><rdf:Seq><rdf:li>${esc(cfg.author)}</rdf:li></rdf:Seq></dc:creator>` +
+    `<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">${esc(rights)}</rdf:li></rdf:Alt></dc:rights></rdf:Description>` +
+    `</rdf:RDF></x:xmpmeta><?xpacket end="w"?>`;
+
+  const append = str => { out = Buffer.concat([out, Buffer.from(str, 'latin1')]); };
+  off[infoNum] = out.length;
+  append(`${infoNum} 0 obj\n<< /Producer (authormark/1) /Author (${esc(cfg.author)}) ` +
+    `/Copyright (${esc(`${cfg.year} ${cfg.author}`)}) >>\nendobj\n`);
+  off[xmpNum] = out.length;
+  append(`${xmpNum} 0 obj\n<< /Type /Metadata /Subtype /XML /Length ${xmp.length} >>\nstream\n${xmp}\nendstream\nendobj\n`);
+  off[rootNum] = out.length;
+  append(`${rootNum} 0 obj\n<< /Type /Catalog /Metadata ${xmpNum} 0 R >>\nendobj\n`);
+
+  const xrefStart = out.length;
+  const nums = [Number(rootNum), infoNum, xmpNum].sort((a, b) => a - b);
+  let xref = `xref\n`;
+  for (const n of nums) xref += `${n} 1\n${String(off[n]).padStart(10, '0')} 00000 n \n`;
+  xref += `trailer\n<< /Size ${size + 1} /Root ${rootNum} 0 R /Info ${infoNum} 0 R /Prev ${prev} >>\n` +
+    `startxref\n${xrefStart}\n%%EOF\n`;
+  return Buffer.concat([out, Buffer.from(xref, 'latin1')]);
+}
+
+// ---------------------------------------------------------------- robustness harness
+
+async function cmdAttack(args) {
+  const file = positional(args)[0];
+  if (!file || !fs.existsSync(file)) die('usage: authormark attack <marked-image>');
+  const have = t => { try { execFileSync(t, ['-version'], { stdio: 'ignore' }); return true; } catch { return false; } };
+  const magick = have('magick') ? 'magick' : have('convert') ? 'convert' : null;
+  if (!magick) die('needs ImageMagick (`magick` or `convert`) on PATH');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'am-attack-'));
+  const ext = path.extname(file).toLowerCase();
+  const attacks = [
+    ['re-encode (q80)', ['-quality', '80']],
+    ['resize 50%', ['-resize', '50%']],
+    ['resize 150%', ['-resize', '150%']],
+    ['crop 90%', ['-gravity', 'center', '-crop', '90%x90%+0+0', '+repage']],
+    ['rotate 90', ['-rotate', '90']],
+    ['grayscale', ['-colorspace', 'Gray']],
+    ['strip metadata', ['-strip']],
+  ];
+  const probe = p => {
+    const buf = fs.readFileSync(p);
+    let visibleMeta = false, lsb = false;
+    try {
+      if (path.extname(p).toLowerCase() === '.png') {
+        const chunks = pngChunks(buf);
+        visibleMeta = chunks.some(c => (c.type === 'tEXt' || c.type === 'iTXt') && c.data.toString('latin1').includes('authormark'));
+        const img = decodePng(buf);
+        lsb = lsbExtract(img.rgba, img.width, img.height).length > 0;
+      } else {
+        visibleMeta = buf.toString('latin1').includes('authormark');
+      }
+    } catch {}
+    return { visibleMeta, lsb };
+  };
+
+  log(`baseline ${file}:`);
+  const base = probe(file);
+  log(`  metadata mark: ${base.visibleMeta ? 'present' : 'ABSENT'} | LSB payload: ${base.lsb ? 'present' : 'n/a'}`);
+  log(`\nafter each attack (ImageMagick):`);
+  for (const [name, ops] of attacks) {
+    const outP = path.join(tmp, `a${ext || '.png'}`);
+    try {
+      execFileSync(magick, [file, ...ops, outP], { stdio: 'ignore' });
+      const r = probe(outP);
+      log(`  ${name.padEnd(20)}  metadata ${r.visibleMeta ? 'survived' : 'lost   '}   LSB ${r.lsb ? 'survived' : 'lost'}`);
+    } catch {
+      log(`  ${name.padEnd(20)}  (attack failed to run)`);
+    }
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------- theft crawl
+
+// Pull the distinctive strings out of this repo's stamped files: the keyed
+// fingerprints and (for ed25519) signatures. A verbatim copy carries them too.
+function localMarks(cfg) {
+  const files = collect([], DEFAULT_EXTS, cfg);
+  const fps = new Set(), sigs = new Set();
+  for (const rel of files) {
+    if (tooBig(rel, cfg)) continue;
+    const { header } = splitHeader(fs.readFileSync(rel, 'utf8'));
+    if (!header) continue;
+    const fp = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
+    const sg = header.match(/Signature: AMK2\.([A-Za-z0-9_-]{40,})/)?.[1];
+    if (fp) fps.add(fp);
+    if (sg) sigs.add(sg);
+  }
+  return { fps: [...fps], sigs: [...sigs] };
+}
+
+async function ghSearchCode(q, token) {
+  const res = await fetch(`https://api.github.com/search/code?per_page=20&q=${encodeURIComponent(q)}`, {
+    headers: {
+      Accept: 'application/vnd.github.v3+json',
+      'User-Agent': 'authormark-crawl',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
+    const wait = Math.max(1, (Number(res.headers.get('x-ratelimit-reset')) * 1000 - Date.now()) / 1000);
+    warn(`GitHub search rate-limited; sleeping ${Math.ceil(wait)}s`);
+    await new Promise(r => setTimeout(r, wait * 1000 + 500));
+    return ghSearchCode(q, token);
+  }
+  if (!res.ok) { warn(`GitHub search "${q}" -> HTTP ${res.status}`); return []; }
+  return (await res.json()).items || [];
+}
+
+async function sgSearch(literal) {
+  // Sourcegraph public instance -- no auth needed for public code.
+  const q = `context:global content:${JSON.stringify(literal)} count:20`;
+  try {
+    const res = await fetch(`https://sourcegraph.com/.api/search/stream?q=${encodeURIComponent(q)}`, {
+      headers: { Accept: 'text/event-stream', 'User-Agent': 'authormark-crawl' },
+    });
+    if (!res.ok) return [];
+    const text = await res.text();
+    const hits = [];
+    for (const line of text.split('\n')) {
+      if (!line.startsWith('data:')) continue;
+      try {
+        const evt = JSON.parse(line.slice(5));
+        if (!Array.isArray(evt)) continue;
+        for (const m of evt) {
+          if (m.type === 'content' || m.repository) {
+            hits.push({ repo: m.repository, path: m.path, url: m.repository ? `https://${m.repository}` : null });
+          }
+        }
+      } catch {}
+    }
+    return hits;
+  } catch { return []; }
+}
+
+async function cmdCrawl(args) {
+  const cfg = loadConfig();
+  const owner = (cfg.github || '').replace(/^https?:\/\/github\.com\//, '').split('/')[0].toLowerCase();
+  const token = flag(args, '--token') || process.env.GITHUB_TOKEN || process.env.GH_TOKEN ||
+    (() => { try { return execFileSync('gh', ['auth', 'token'], { encoding: 'utf8' }).trim(); } catch { return null; } })();
+  const asJson = args.includes('--json');
+  const ghOnly = args.includes('--github-only');
+  const sgOnly = args.includes('--sourcegraph-only');
+
+  const { fps, sigs } = localMarks(cfg);
+  // Each needle: the literal to search plus which label prefixes it.
+  const needles = [
+    ...sigs.slice(0, 3).map(v => ({ literal: `AMK2.${v}`, kind: 'sig' })),
+    ...fps.map(v => ({ literal: `AMK1.${v}`, kind: 'fp' })),
+  ].slice(0, 8);
+  if (!needles.length) die('no stamped files here -- nothing to search for');
+
+  const foreign = [];
+  const seen = new Set();
+  // "owner/repo" or "host/owner/repo" -> owner segment.
+  const ownerOf = repo => {
+    const segs = repo.toLowerCase().replace(/^https?:\/\//, '').split('/').filter(Boolean);
+    return segs.length >= 2 ? segs[segs.length - 2] : '';
+  };
+  const add = (src, repo, filePath, url) => {
+    if (!repo || (owner && ownerOf(repo) === owner)) return;   // skip your own repos
+    const k = `${repo}::${filePath}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    foreign.push({ via: src, repo, path: filePath || null, url: url || null });
+  };
+
+  if (!sgOnly) {
+    if (!token) warn('no GitHub token (env GITHUB_TOKEN/GH_TOKEN or --token) -- code search needs auth; skipping GitHub');
+    else {
+      for (const n of needles) {
+        for (const it of await ghSearchCode(`"${n.literal}"`, token)) {
+          add('github', it.repository?.full_name, it.path, it.html_url);
+        }
+        await new Promise(r => setTimeout(r, 6500));   // stay under 10 search req/min
+      }
+    }
+  }
+  if (!ghOnly) {
+    for (const n of needles.slice(0, 4)) {
+      for (const h of await sgSearch(n.literal)) add('sourcegraph', h.repo, h.path, h.url);
+    }
+  }
+
+  if (asJson) { process.stdout.write(JSON.stringify({ owner, searched: needles.length, foreign }, null, 2) + '\n'); }
+  else if (!foreign.length) log(`\ncrawl: no copies of ${needles.length} mark(s) found outside @${owner}.`);
+  else {
+    log(`\ncrawl: ${foreign.length} possible copy/copies outside @${owner}:`);
+    for (const f of foreign) log(`  [${f.via}] ${f.repo}${f.path ? ' / ' + f.path : ''}${f.url ? '  ' + f.url : ''}`);
+  }
+  if (foreign.length) process.exitCode = 2;
 }
 
 function scanPng(buf, key) {
@@ -816,7 +1621,9 @@ jobs:
         with:
           node-version: '20'
       - name: Verify authorship watermarks are intact
-        run: node .authormark/authormark.mjs check --presence .
+        # ed25519 repos verify signatures here from the public key in
+        # .authormark.json; hmac repos fall back to a presence check (no secret in CI).
+        run: node .authormark/authormark.mjs check .
 `;
 
 const AGENT_RULE = `
@@ -971,39 +1778,82 @@ const USAGE = `authormark -- layered authorship watermarking
        ONE COMMAND for a new repo: init + vendor + CI + agent rules + LICENSE
        + stamp + images + seal + pre-commit hook. Idempotent -- rerun anytime.
 
-  init [--author N] [--email E] [--github U] [--license L]
-       create .authormark.json + your secret HMAC key (~/.authormark.key)
+  init [--author N] [--email E] [--github U] [--license L] [--reuse] [--ed25519]
+       create .authormark.json + your secret key (~/.authormark.key)
+       --reuse   also emits a REUSE-spec SPDX-FileCopyrightText line
+       --ed25519 asymmetric mode: a Signature: line CI verifies from the public
+                 key in config -- no secret needed to check authenticity
 
   stamp <paths...> [--ext .ts,.tsx] [--zw] [--dry]
        insert/refresh the copyright header + keyed fingerprint in source files
        --zw also plants an invisible zero-width mark that survives copy-paste
+       honours .authormarkignore plus the config include / maxBytes settings
 
-  check [paths...] | check --staged
+  unstamp <paths...> [--ext ...] [--force]
+       remove the header block (licence change / upstreaming). Dry unless --force.
+
+  check [paths...] | check --staged | check --json
        exit 1 if any file is unmarked or its fingerprint is stale (for CI/hooks)
 
-  seal [paths...]        write AUTHORSHIP.json: per-file hashes + keyed proof
+  seal [paths...]        write AUTHORSHIP.json + append a hash-chained AUTHORSHIP.log entry
   verify [manifest]      re-verify a manifest against the working tree
+  chain                  walk AUTHORSHIP.log: check every prev-hash link and keyed mac
+  timestamp [file] [--tsa URL]
+                        get an RFC 3161 token for AUTHORSHIP.json (needs openssl)
+  attest [paths...] [-o file] [--sign]
+                        write a SLSA provenance statement; --sign calls cosign
+  rotate [--keep]       new secret key; old one archived and still tried on check/scan
   scan <files...>        show every mark found in a source file or image
   image <files...> [-o out] [--inplace] [--visible "txt"] [--tile]
                    [--opacity 0.55] [--scale N] [--no-stego]
        PNG: text chunks + optional visible watermark + hidden LSB payload
        JPEG: EXIF Artist/Copyright + XMP + COM comment (metadata only)
+       GIF/SVG/WebP/MP3/MP4/PDF: metadata-level authorship marks
+  attack <marked-image>  re-encode/resize/crop/rotate/strip via ImageMagick and
+                        report which marks survive each (needs magick or convert)
+  crawl [--token T] [--github-only|--sourcegraph-only] [--json]
+                        search GitHub code + Sourcegraph for this repo's
+                        fingerprints/signatures in repos you do not own
   hook install           git pre-commit hook that blocks de-watermarked commits`;
 
-const [cmd, ...rest] = process.argv.slice(2);
-try {
-  switch (cmd) {
-    case 'init': cmdInit(rest); break;
-    case 'setup': cmdSetup(rest); break;
-    case 'stamp': cmdStamp(rest); break;
-    case 'check': cmdCheck(rest); break;
-    case 'seal': cmdSeal(rest); break;
-    case 'verify': cmdVerify(rest); break;
-    case 'scan': cmdScan(rest); break;
-    case 'image': cmdImage(rest); break;
-    case 'hook': cmdHook(rest); break;
-    default: log(USAGE); process.exit(cmd ? 1 : 0);
+async function runCli(argv) {
+  const [cmd, ...rest] = argv;
+  try {
+    switch (cmd) {
+      case 'init': cmdInit(rest); break;
+      case 'setup': cmdSetup(rest); break;
+      case 'stamp': cmdStamp(rest); break;
+      case 'unstamp': cmdUnstamp(rest); break;
+      case 'check': cmdCheck(rest); break;
+      case 'seal': cmdSeal(rest); break;
+      case 'verify': cmdVerify(rest); break;
+      case 'chain': cmdChain(rest); break;
+      case 'timestamp': await cmdTimestamp(rest); break;
+      case 'attest': cmdAttest(rest); break;
+      case 'rotate': cmdRotate(rest); break;
+      case 'scan': cmdScan(rest); break;
+      case 'image': cmdImage(rest); break;
+      case 'attack': await cmdAttack(rest); break;
+      case 'crawl': await cmdCrawl(rest); break;
+      case 'hook': cmdHook(rest); break;
+      default: log(USAGE); process.exit(cmd ? 1 : 0);
+    }
+  } catch (e) {
+    die(e.message);
   }
-} catch (e) {
-  die(e.message);
 }
+
+// Only dispatch when run directly, so tests can import the pure helpers.
+const isMain = (() => {
+  try { return fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1]); }
+  catch { return false; }
+})();
+if (isMain) runCli(process.argv.slice(2)).catch(e => die(e.message));
+
+export {
+  canonical, fingerprint, contentDigest, signer, zwEncode, zwDecode, splitHeader, insertIndex,
+  styleFor, renderHeader, headerLines, isHeaderLine, crc32, textMask,
+  lsbEmbed, lsbExtract, buildExif, collect, ignored, includedBy, matchGlob,
+  tooBig, hashFile, appendChain, loadAllKeys, localMarks,
+  gifMark, svgMark, mp3Mark, webpMark, mp4Mark, pdfMark, runCli,
+};

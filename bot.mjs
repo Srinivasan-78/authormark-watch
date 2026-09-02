@@ -60,6 +60,7 @@ function loadConfig() {
       github: 'https://github.com/Srinivasan-78',
     },
     labelPalette: {},
+    notify: {},
   };
 
   if (fs.existsSync(CONFIG_FILE)) {
@@ -72,12 +73,36 @@ function loadConfig() {
         features: { ...defaults.features, ...(parsed.features || {}) },
         botIdentity: { ...defaults.botIdentity, ...(parsed.botIdentity || {}) },
         labelPalette: { ...defaults.labelPalette, ...(parsed.labelPalette || {}) },
+        notify: { ...defaults.notify, ...(parsed.notify || {}) },
       };
     } catch (e) {
       console.warn(`[warn] Failed to parse bot.config.json: ${e.message}. Using defaults.`);
     }
   }
   return defaults;
+}
+
+// A repo may ship its own `.masterbot.json` to override feature flags for
+// itself only (shallow merge of the `features` and `repos` sub-trees).
+function applyRepoOverrides(config, repoDir) {
+  const p = path.join(repoDir, '.masterbot.json');
+  if (!fs.existsSync(p)) return config;
+  try {
+    const o = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return {
+      ...config,
+      ...o,
+      features: {
+        authormark: { ...config.features.authormark, ...(o.features?.authormark || {}) },
+        lint: { ...config.features.lint, ...(o.features?.lint || {}) },
+        prTagger: { ...config.features.prTagger, ...(o.features?.prTagger || {}) },
+        issueTagger: { ...config.features.issueTagger, ...(o.features?.issueTagger || {}) },
+      },
+    };
+  } catch {
+    warn(`ignored malformed .masterbot.json in ${path.basename(repoDir)}`);
+    return config;
+  }
 }
 
 // ---------------------------------------------------------------- Logger & Helpers
@@ -89,6 +114,26 @@ function errLog(msg) { console.error(`::error::${msg}`); }
 function sanitize(text) {
   if (!text) return '';
   return String(text).replace(/(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, '***');
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Exponential backoff with full jitter, capped at 30s.
+function backoffMs(attempt) {
+  return Math.min(30000, Math.round((2 ** attempt) * 500 * (0.5 + Math.random())));
+}
+
+// Prefer the server's own guidance (Retry-After seconds, or the epoch in
+// x-ratelimit-reset) over blind backoff; fall back to exponential.
+function rateLimitDelayMs(res, attempt) {
+  const ra = Number(res.headers.get('retry-after'));
+  if (Number.isFinite(ra) && ra > 0) return Math.min(60000, ra * 1000);
+  const reset = Number(res.headers.get('x-ratelimit-reset'));
+  if (Number.isFinite(reset) && reset > 0) {
+    const wait = reset * 1000 - Date.now();
+    if (wait > 0) return Math.min(60000, wait + 1000);
+  }
+  return backoffMs(attempt);
 }
 
 function resolveToken() {
@@ -111,6 +156,32 @@ function resolveIssueToken() {
   return resolveToken();
 }
 
+// Post a one-line status to Slack and/or Discord when there is something to
+// report. Webhook URLs come from config.notify.{slack,discord} or the
+// SLACK_WEBHOOK / DISCORD_WEBHOOK env vars.
+async function notify(config, summary, hasIssues, isDryRun) {
+  if (isDryRun || !hasIssues) return;
+  const slack = config.notify?.slack || process.env.SLACK_WEBHOOK;
+  const discord = config.notify?.discord || process.env.DISCORD_WEBHOOK;
+  if (!slack && !discord) return;
+
+  const am = summary.authormark;
+  const parts = [];
+  if (am.drifted.length + am.unmarked.length) parts.push(`${am.drifted.length + am.unmarked.length} watermark`);
+  if (summary.lintFindings.length) parts.push(`${summary.lintFindings.length} hygiene`);
+  if (summary.securityAlerts.length) parts.push(`${summary.securityAlerts.length} security`);
+  if (summary.failedRepos.length) parts.push(`${summary.failedRepos.length} unreachable`);
+  const text = `*Master Bot* (@${config.owner}) — ${parts.join(', ')} finding(s) across ${summary.total} repos. ` +
+    `See the dashboard issue in authormark-watch.`;
+
+  const post = (url, body) => fetch(url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).catch(e => warn(`notify failed: ${sanitize(e.message)}`));
+
+  if (slack) await post(slack, { text });
+  if (discord) await post(discord, { content: text.replace(/\*/g, '**') });
+}
+
 // ---------------------------------------------------------------- GitHub REST API Client
 
 class GitHubClient {
@@ -124,6 +195,7 @@ class GitHubClient {
     const url = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint}`;
     const headers = {
       Accept: 'application/vnd.github.v3+json',
+      'X-GitHub-Api-Version': '2022-11-28',
       'User-Agent': 'AuthorMark-MasterBot/1.0 (+https://github.com/Srinivasan-78/authormark-watch)',
       ...(options.headers || {}),
     };
@@ -131,18 +203,77 @@ class GitHubClient {
       headers.Authorization = `Bearer ${this.token}`;
     }
 
-    try {
-      const res = await fetch(url, { ...options, headers });
+    const maxAttempts = options.retries ?? 4;
+    let lastErr = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let res;
+      try {
+        res = await fetch(url, { ...options, headers });
+      } catch (e) {
+        // Network blip: back off and retry.
+        lastErr = new Error(`GitHub API Error: ${sanitize(e.message)}`);
+        if (attempt < maxAttempts) { await sleep(backoffMs(attempt)); continue; }
+        throw lastErr;
+      }
+
       if (res.status === 204) return null;
+
+      // Primary/secondary rate limits and transient server errors are retryable.
+      const retryable = res.status === 429 || res.status >= 500 ||
+        (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0');
+      if (retryable && attempt < maxAttempts) {
+        await sleep(rateLimitDelayMs(res, attempt));
+        continue;
+      }
+
       const data = await res.json().catch(() => null);
       if (!res.ok) {
         const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-        throw new Error(`${options.method || 'GET'} ${endpoint} failed (${res.status}): ${msg}`);
+        throw new Error(`${options.method || 'GET'} ${endpoint} failed (${res.status}): ${sanitize(msg)}`);
       }
       return data;
-    } catch (e) {
-      throw new Error(`GitHub API Error: ${sanitize(e.message)}`);
     }
+
+    throw lastErr || new Error(`GitHub API Error: exhausted retries for ${endpoint}`);
+  }
+
+  // Full PR payload -- the list endpoint omits additions/deletions/changed_files.
+  async getPullRequest(owner, repo, pullNumber) {
+    return this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}`);
+  }
+
+  // GitHub-native security alerts. Each may 403 (feature off / token scope) --
+  // the caller treats a throw as "unknown", not "zero".
+  async countOpenAlerts(owner, repo) {
+    const result = { dependabot: 0, codeScanning: 0, secretScanning: 0, vulnerabilityAlertsDisabled: false };
+    try {
+      const d = await this.request(`/repos/${owner}/${repo}/dependabot/alerts?state=open&per_page=100`, { retries: 1 });
+      result.dependabot = Array.isArray(d) ? d.length : 0;
+    } catch {}
+    try {
+      const c = await this.request(`/repos/${owner}/${repo}/code-scanning/alerts?state=open&per_page=100`, { retries: 1 });
+      result.codeScanning = Array.isArray(c) ? c.length : 0;
+    } catch {}
+    try {
+      const s = await this.request(`/repos/${owner}/${repo}/secret-scanning/alerts?state=open&per_page=100`, { retries: 1 });
+      result.secretScanning = Array.isArray(s) ? s.length : 0;
+    } catch {}
+    try {
+      // 204 = enabled, 404 = disabled
+      await this.request(`/repos/${owner}/${repo}/vulnerability-alerts`, { retries: 1 });
+    } catch (e) {
+      if (/\(404\)/.test(e.message)) result.vulnerabilityAlertsDisabled = true;
+    }
+    return result;
+  }
+
+  // Resolve a tag/branch ref to a full commit SHA (for pinning `uses:` lines).
+  async resolveRef(owner, repo, ref) {
+    try {
+      const c = await this.request(`/repos/${owner}/${repo}/commits/${ref}`, { retries: 1 });
+      return c && c.sha ? c.sha : null;
+    } catch { return null; }
   }
 
   async listRepos(owner) {
@@ -263,12 +394,17 @@ const LINT_SKIP_DIRS = new Set([
 ]);
 
 const SECRET_PATTERNS = [
-  { name: 'GitHub Personal Access Token', regex: /(ghp_[A-Za-z0-9_]{36}|github_pat_[A-Za-z0-9_]{82})/ },
+  { name: 'GitHub Personal Access Token', regex: /(gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{82})/ },
   { name: 'Google / Firebase API Key', regex: /AIza[0-9A-Za-z\-_]{35}/ },
+  { name: 'Google OAuth Client Secret', regex: /GOCSPX-[A-Za-z0-9_-]{28}/ },
   { name: 'AWS Access Key ID', regex: /(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}/ },
-  { name: 'Private Key', regex: /-----BEGIN (?:RSA|OPENSSH|EC|DSA|PGP|PRIVATE) KEY-----/ },
-  { name: 'Slack Webhook / Token', regex: /https:\/\/hooks\.slack\.com\/services\/T[0-9A-Z_]+\/B[0-9A-Z_]+\/[0-9A-Za-z]+/ },
+  // Real PEM keys read "BEGIN RSA PRIVATE KEY" / "BEGIN OPENSSH PRIVATE KEY" etc.
+  { name: 'Private Key', regex: /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/ },
+  { name: 'Slack Token', regex: /xox[baprs]-[0-9A-Za-z-]{10,}/ },
+  { name: 'Slack Webhook', regex: /https:\/\/hooks\.slack\.com\/services\/T[0-9A-Z_]+\/B[0-9A-Z_]+\/[0-9A-Za-z]+/ },
   { name: 'Discord Webhook', regex: /https:\/\/discord(?:app)?\.com\/api\/webhooks\/[0-9]+\/[A-Za-z0-9_\-]+/ },
+  { name: 'Stripe Secret Key', regex: /sk_live_[0-9a-zA-Z]{24,}/ },
+  { name: 'npm Access Token', regex: /npm_[A-Za-z0-9]{36}/ },
   { name: 'Generic JWT Token', regex: /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/ },
 ];
 
@@ -291,6 +427,134 @@ function walkFiles(dir, acc = []) {
   return acc;
 }
 
+// Best-effort GitHub Actions security audit -- string heuristics, no YAML parser.
+// Returns an array of human-readable risk strings for one workflow file.
+function auditWorkflow(text, file) {
+  const risks = [];
+  const lines = text.split('\n');
+  const has = re => re.test(text);
+
+  // 1. pull_request_target + a checkout of attacker-controlled PR code
+  if (has(/^\s*pull_request_target\s*:/m) &&
+      has(/uses:\s*actions\/checkout/) &&
+      has(/ref:\s*\$\{\{\s*github\.event\.pull_request\.head/)) {
+    risks.push(`\`${file}\`: \`pull_request_target\` checks out PR head code — runs untrusted code with a write token`);
+  }
+
+  // 2. Unpinned actions (tag/branch instead of a full commit SHA)
+  const unpinned = new Set();
+  for (const m of text.matchAll(/uses:\s*([^\s#'"]+)@([^\s#'"]+)/g)) {
+    const [, action, ref] = m;
+    if (action.startsWith('./') || action.startsWith('docker://')) continue;
+    if (/^[0-9a-f]{40}$/.test(ref)) continue;
+    unpinned.add(`${action}@${ref}`);
+  }
+  if (unpinned.size) risks.push(`\`${file}\`: ${unpinned.size} action(s) pinned to a tag, not a SHA: ${[...unpinned].slice(0, 6).join(', ')}`);
+
+  // 3. Token scope
+  if (has(/permissions:\s*write-all/)) risks.push(`\`${file}\`: \`permissions: write-all\` — grant least privilege instead`);
+  else if (!has(/^\s*permissions\s*:/m)) risks.push(`\`${file}\`: no top-level \`permissions:\` — the job gets the default broad \`GITHUB_TOKEN\``);
+
+  // 4. Script injection: untrusted event data interpolated into a shell step
+  const risky = /\$\{\{\s*github\.event\.(?:issue\.title|issue\.body|pull_request\.title|pull_request\.body|pull_request\.head\.ref|pull_request\.head\.label|comment\.body|review\.body|head_commit\.message|pages|commits)/;
+  let inRun = false;
+  for (const l of lines) {
+    if (/^\s*(-\s*)?run:\s*[|>]?/.test(l)) inRun = true;
+    else if (inRun && /^\s*\S/.test(l) && !/^\s+/.test(l.replace(/^\s*-\s*/, ''))) inRun = false;
+    if (inRun && risky.test(l)) {
+      risks.push(`\`${file}\`: untrusted \`\${{ github.event.* }}\` used in a \`run:\` step — inject via an env: var instead`);
+      break;
+    }
+  }
+
+  // 5. curl | sh
+  if (has(/(curl|wget)\s+[^\n|]*\|\s*(sudo\s+)?(ba)?sh\b/)) {
+    risks.push(`\`${file}\`: pipes a network download straight into a shell`);
+  }
+
+  return risks;
+}
+
+// Rewrite `uses: owner/repo@tag` -> `uses: owner/repo@<sha>  # tag`, using a
+// pre-resolved Map of "owner/repo@ref" -> sha. Pure; returns { text, changes }.
+function pinWorkflowActions(text, shaMap) {
+  const changes = [];
+  const out = text.replace(/(\buses:\s*)([^\s#'"]+)@([^\s#'"]+)([^\n]*)/g, (m, pre, action, ref, rest) => {
+    if (/^[0-9a-f]{40}$/.test(ref) || action.startsWith('./') || action.startsWith('docker://')) return m;
+    const sha = shaMap.get(`${action}@${ref}`);
+    if (!sha) return m;
+    changes.push(`${action}@${ref} -> ${sha.slice(0, 12)}`);
+    const trailing = /#/.test(rest) ? rest.replace(/#.*/, `# ${ref}`) : `${rest}  # ${ref}`;
+    return `${pre}${action}@${sha}${trailing}`;
+  });
+  return { text: out, changes };
+}
+
+// Resolve every unpinned action ref in .github/workflows/* and rewrite the files.
+async function pinActionsOnDisk(repoDir, client) {
+  const dir = path.join(repoDir, '.github', 'workflows');
+  if (!fs.existsSync(dir)) return 0;
+  const wanted = new Set();
+  const texts = {};
+  for (const f of fs.readdirSync(dir)) {
+    if (!/\.ya?ml$/.test(f)) continue;
+    const t = fs.readFileSync(path.join(dir, f), 'utf8');
+    texts[f] = t;
+    for (const m of t.matchAll(/uses:\s*([^\s#'"]+)@([^\s#'"]+)/g)) {
+      const [, action, ref] = m;
+      if (/^[0-9a-f]{40}$/.test(ref) || action.startsWith('./') || action.startsWith('docker://')) continue;
+      if (action.split('/').length < 2) continue;
+      wanted.add(`${action}@${ref}`);
+    }
+  }
+  const shaMap = new Map();
+  for (const key of wanted) {
+    const at = key.lastIndexOf('@');
+    const action = key.slice(0, at), ref = key.slice(at + 1);
+    const [o, r] = action.split('/');
+    const sha = await client.resolveRef(o, r, ref);
+    if (sha) shaMap.set(key, sha);
+  }
+  let total = 0;
+  for (const [f, t] of Object.entries(texts)) {
+    const { text: next, changes } = pinWorkflowActions(t, shaMap);
+    if (changes.length) { fs.writeFileSync(path.join(dir, f), next); total += changes.length; }
+  }
+  return total;
+}
+
+const HISTORY_SECRET_RE = 'ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}|AKIA[A-Z0-9]{16}|AIza[0-9A-Za-z_\\-]{35}|xox[baprs]-[0-9A-Za-z-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|sk_live_[0-9a-zA-Z]{24}';
+
+// Look for secrets that were committed and later removed -- still recoverable
+// from history. Prefilter with `git log -G` so we only `show` candidate commits.
+function scanGitHistory(repoDir) {
+  const out = [];
+  try {
+    const shas = execSync(
+      `git log --all --no-merges -n 400 --format=%H -G"${HISTORY_SECRET_RE}"`,
+      { cwd: repoDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).split('\n').filter(Boolean).slice(0, 15);
+    const re = new RegExp(HISTORY_SECRET_RE);
+    for (const sha of shas) {
+      let diff = '';
+      try {
+        diff = execSync(`git show --no-color --format= ${sha}`, { cwd: repoDir, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+      } catch { continue; }
+      let file = '';
+      for (const l of diff.split('\n')) {
+        const fm = l.match(/^\+\+\+ b\/(.+)/);
+        if (fm) { file = fm[1]; continue; }
+        if (l.startsWith('+') && !l.startsWith('+++') && re.test(l) && !/\.(md|test|spec|example|sample)\b/.test(file)) {
+          out.push(`Secret-shaped string in \`${file}\` at commit \`${sha.slice(0, 10)}\` (still in history)`);
+          break;
+        }
+      }
+      if (out.length >= 10) break;
+    }
+  } catch {}
+  return out;
+}
+
 function lintRepository(repoDir, repoName) {
   const findings = {
     secrets: [],
@@ -298,10 +562,26 @@ function lintRepository(repoDir, repoName) {
     unwantedArtifacts: [],
     standards: [],
     whitespaceIssues: [],
+    workflowRisks: [],
+    historySecrets: [],
   };
 
   const files = walkFiles(repoDir);
   const rel = f => path.relative(repoDir, f).replace(/\\/g, '/');
+
+  // 0. GitHub Actions workflow security audit + secrets in git history
+  const wfDir = path.join(repoDir, '.github', 'workflows');
+  if (fs.existsSync(wfDir)) {
+    for (const wf of fs.readdirSync(wfDir)) {
+      if (!/\.ya?ml$/.test(wf)) continue;
+      try {
+        for (const risk of auditWorkflow(fs.readFileSync(path.join(wfDir, wf), 'utf8'), `.github/workflows/${wf}`)) {
+          findings.workflowRisks.push(risk);
+        }
+      } catch {}
+    }
+  }
+  for (const h of scanGitHistory(repoDir)) findings.historySecrets.push(h);
 
   // 1. Repo Health Standards
   const hasFile = name => fs.existsSync(path.join(repoDir, name));
@@ -325,6 +605,35 @@ function lintRepository(repoDir, repoName) {
   if (!hasFile('AGENTS.md') && !hasFile('CLAUDE.md')) {
     findings.standards.push('Missing AI Agent guidance rules (`AGENTS.md` / `CLAUDE.md`)');
   }
+  // SECURITY.md is valid at the root, in .github/, or in docs/ (GitHub reads all three).
+  if (!['SECURITY.md', '.github/SECURITY.md', 'docs/SECURITY.md'].some(hasFile)) {
+    findings.standards.push('Missing `SECURITY.md` disclosure policy');
+  }
+  if (!['CONTRIBUTING.md', '.github/CONTRIBUTING.md', 'docs/CONTRIBUTING.md'].some(hasFile)) {
+    findings.standards.push('Missing `CONTRIBUTING.md`');
+  }
+  if (!hasFile('.github/dependabot.yml') && !hasFile('.github/dependabot.yaml')) {
+    findings.standards.push('No Dependabot config (`.github/dependabot.yml`)');
+  }
+
+  // 1b. Licence consistency: package.json `license` vs the SPDX headers / LICENSE.
+  try {
+    const pkgPath = path.join(repoDir, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const declared = (JSON.parse(fs.readFileSync(pkgPath, 'utf8')).license || '').trim();
+      if (declared) {
+        const licenseText = licenses.map(l => path.join(repoDir, l)).filter(fs.existsSync)
+          .map(p => fs.readFileSync(p, 'utf8')).join('\n');
+        const looksMIT = /MIT License|Permission is hereby granted, free of charge/i.test(licenseText);
+        const looksApache = /Apache License/i.test(licenseText);
+        if (looksMIT && !/^MIT$/i.test(declared)) {
+          findings.standards.push(`\`package.json\` says license "${declared}" but LICENSE is MIT`);
+        } else if (looksApache && !/apache/i.test(declared)) {
+          findings.standards.push(`\`package.json\` says license "${declared}" but LICENSE is Apache-2.0`);
+        }
+      }
+    }
+  } catch {}
 
   // 2. Scan Individual Files
   for (const file of files) {
@@ -506,6 +815,38 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
       changesMade.push('Created `AGENTS.md` and `CLAUDE.md` rules');
     }
 
+    // 5b. Community-health scaffolds
+    const ghDir = path.join(repoDir, '.github');
+    if (!['SECURITY.md', '.github/SECURITY.md', 'docs/SECURITY.md'].some(f => fs.existsSync(path.join(repoDir, f)))) {
+      fs.mkdirSync(ghDir, { recursive: true });
+      fs.writeFileSync(path.join(ghDir, 'SECURITY.md'),
+        `# Security Policy\n\n## Reporting a Vulnerability\n\nPlease report security issues privately to ` +
+        `[@${owner}](https://github.com/${owner}) via a GitHub Security Advisory or email. ` +
+        `Do not open a public issue for undisclosed vulnerabilities.\n\nWe aim to acknowledge reports within 72 hours.\n`);
+      changesMade.push('Created `.github/SECURITY.md`');
+    }
+    if (!['CONTRIBUTING.md', '.github/CONTRIBUTING.md', 'docs/CONTRIBUTING.md'].some(f => fs.existsSync(path.join(repoDir, f)))) {
+      fs.mkdirSync(ghDir, { recursive: true });
+      fs.writeFileSync(path.join(ghDir, 'CONTRIBUTING.md'),
+        `# Contributing\n\nThanks for helping out.\n\n1. Fork and branch from \`main\`.\n2. Keep changes focused; add or update tests.\n` +
+        `3. Do not remove \`@authormark\` headers — refresh a stale fingerprint with \`authormark stamp <file>\`.\n` +
+        `4. Open a pull request describing the change and its motivation.\n`);
+      changesMade.push('Created `.github/CONTRIBUTING.md`');
+    }
+    if (!fs.existsSync(path.join(ghDir, 'dependabot.yml')) && !fs.existsSync(path.join(ghDir, 'dependabot.yaml'))) {
+      const ecos = [];
+      if (fs.existsSync(path.join(repoDir, 'package.json'))) ecos.push('npm');
+      if (fs.existsSync(path.join(repoDir, 'requirements.txt')) || fs.existsSync(path.join(repoDir, 'pyproject.toml'))) ecos.push('pip');
+      if (fs.existsSync(path.join(repoDir, 'go.mod'))) ecos.push('gomod');
+      if (fs.existsSync(path.join(repoDir, 'Cargo.toml'))) ecos.push('cargo');
+      ecos.push('github-actions');
+      fs.mkdirSync(ghDir, { recursive: true });
+      fs.writeFileSync(path.join(ghDir, 'dependabot.yml'),
+        `version: 2\nupdates:\n` +
+        ecos.map(e => `  - package-ecosystem: "${e}"\n    directory: "/"\n    schedule:\n      interval: "weekly"\n`).join(''));
+      changesMade.push('Created `.github/dependabot.yml`');
+    }
+
     // 6. Fix Trailing Whitespace in code/text files
     const allFiles = walkFiles(repoDir);
     let wsFilesFixed = 0;
@@ -558,8 +899,16 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
 
 function classifyPullRequest(pr, files, palette) {
   const labelsToAdd = new Set();
-  const additions = pr.additions || 0;
-  const deletions = pr.deletions || 0;
+  const filesArr = Array.isArray(files) ? files : [];
+
+  // The list endpoint omits additions/deletions, so everything scored size/XS.
+  // Use the full-PR counts when present, else sum the per-file diff stats.
+  const additions = Number.isFinite(pr.additions)
+    ? pr.additions
+    : filesArr.reduce((s, f) => s + (f.additions || 0), 0);
+  const deletions = Number.isFinite(pr.deletions)
+    ? pr.deletions
+    : filesArr.reduce((s, f) => s + (f.deletions || 0), 0);
   const totalLines = additions + deletions;
 
   // 1. Size Labels
@@ -807,6 +1156,11 @@ Environment Variables:
   AUTHORMARK_KEY                                    - HMAC key for AuthorMark stamping
   FIX=1                                             - Equivalent to --fix
   REPORT=0                                          - Skip updating the GitHub issue dashboard
+  SLACK_WEBHOOK / DISCORD_WEBHOOK                   - Post a summary line when findings need attention
+  GITHUB_STEP_SUMMARY                               - (set by Actions) report is appended to the run summary
+
+Per-repo override: a repo may ship .masterbot.json to set { "enabled": false }
+or tune features.{authormark,lint}.autoFix for itself.
 `);
     process.exit(0);
   }
@@ -898,6 +1252,7 @@ Environment Variables:
     authormark: { clean: [], drifted: [], unmarked: [], fixed: [], fixFailed: [] },
     lintFindings: [],
     lintFixed: [],
+    securityAlerts: [],
     prsTagged: [],
     issuesTagged: [],
     failedRepos: [],
@@ -928,6 +1283,17 @@ Environment Variables:
       }
     }
 
+    // Let the repo veto or tune the bot for itself via .masterbot.json.
+    const repoCfg = applyRepoOverrides(config, repoDir);
+    if (repoCfg.enabled === false) {
+      log(`  ⏭️  ${name} opts out via .masterbot.json (enabled: false)`);
+      summary.authormark.clean.push(name);
+      continue;
+    }
+    const repoFix = isFix &&
+      repoCfg.features.authormark.autoFix !== false &&
+      repoCfg.features.authormark.enabled !== false;
+
     // A. AuthorMark Check
     log(`  [1/4] Checking AuthorMark watermarks & signatures...`);
     const amResult = checkAuthorMark(repoDir);
@@ -945,7 +1311,7 @@ Environment Variables:
     }
 
     // Fix AuthorMark if requested
-    if ((amResult.status === 'DRIFTED' || amResult.status === 'UNMARKED') && isFix && !isDryRun) {
+    if ((amResult.status === 'DRIFTED' || amResult.status === 'UNMARKED') && repoFix && !isDryRun) {
       log(`    🔧 Attempting AuthorMark automated fix & PR creation...`);
       const fixResult = fixAuthorMark(repoDir, name, config, token);
       if (fixResult.success) {
@@ -991,14 +1357,27 @@ Environment Variables:
         lintRes.syntaxErrors.length +
         lintRes.unwantedArtifacts.length +
         lintRes.standards.length +
-        lintRes.whitespaceIssues.length;
+        lintRes.whitespaceIssues.length +
+        lintRes.workflowRisks.length +
+        lintRes.historySecrets.length;
 
       if (issueCount > 0) {
         log(`    ⚠️ Found ${issueCount} hygiene / lint findings.`);
         summary.lintFindings.push({ name, ...lintRes });
 
-        const hasFixable = lintRes.unwantedArtifacts.length > 0 || lintRes.standards.length > 0 || lintRes.whitespaceIssues.length > 0;
-        const lintAutoFix = isFix || config.features?.lint?.autoFix === true;
+        const lintAutoFix = (repoFix || repoCfg.features?.lint?.autoFix === true) &&
+          repoCfg.features?.lint?.enabled !== false;
+
+        // Pin unpinned GitHub Actions to a commit SHA (writes files to disk;
+        // fixLintRepository's `git add -A` picks them up).
+        let pinnedCount = 0;
+        if (lintAutoFix && !isDryRun && token && lintRes.workflowRisks.some(r => /pinned to a tag/.test(r))) {
+          pinnedCount = await pinActionsOnDisk(repoDir, client);
+          if (pinnedCount) log(`    📌 Pinned ${pinnedCount} action reference(s) to a SHA`);
+        }
+
+        const hasFixable = lintRes.unwantedArtifacts.length > 0 || lintRes.standards.length > 0 ||
+          lintRes.whitespaceIssues.length > 0 || pinnedCount > 0;
 
         if (hasFixable && lintAutoFix && !isDryRun) {
           log(`    🔧 Attempting automated repository hygiene & standards fix...`);
@@ -1038,14 +1417,29 @@ Environment Variables:
       }
     }
 
+    // B2. GitHub-native security alerts
+    if (doLint && token) {
+      try {
+        const a = await client.countOpenAlerts(config.owner, name);
+        if (a.dependabot || a.codeScanning || a.secretScanning || a.vulnerabilityAlertsDisabled) {
+          log(`    🛡️ Security alerts: ${a.dependabot} Dependabot / ${a.codeScanning} code-scanning / ${a.secretScanning} secret-scanning`);
+          summary.securityAlerts.push({ name, ...a });
+        }
+      } catch (e) {
+        warn(`Could not read security alerts for ${name}: ${e.message}`);
+      }
+    }
+
     // C. Automated PR Tagging
     if (doPrTag && token) {
       log(`  [3/4] Inspecting open pull requests for auto-tagging...`);
       try {
         const prs = await client.listPullRequests(config.owner, name, 'open');
         for (const pr of prs) {
+          // Full payload for accurate size labels; files for language labels.
+          const full = await client.getPullRequest(config.owner, name, pr.number).catch(() => pr);
           const files = await client.getPullRequestFiles(config.owner, name, pr.number).catch(() => []);
-          const classification = classifyPullRequest(pr, files, config.labelPalette);
+          const classification = classifyPullRequest(full, files, config.labelPalette);
           if (classification.toAdd.length > 0) {
             log(`    🏷️ PR #${pr.number} ("${pr.title}") -> Adding: [${classification.toAdd.join(', ')}]`);
             if (!isDryRun) {
@@ -1111,6 +1505,21 @@ Environment Variables:
   const report = buildMarkdownReport(config, summary);
   console.log('\n' + report + '\n');
 
+  const hasIssues =
+    summary.authormark.drifted.length > 0 ||
+    summary.authormark.unmarked.length > 0 ||
+    summary.lintFindings.length > 0 ||
+    summary.securityAlerts.length > 0 ||
+    summary.failedRepos.length > 0;
+
+  // GitHub Actions job summary -- shows the report on the run page, no issue needed.
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    try { fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, report + '\n'); } catch {}
+  }
+
+  // Optional chat notification when something needs attention.
+  await notify(config, summary, hasIssues, isDryRun);
+
   // ---------------------------------------------------------------- GitHub Status Issue
 
   const shouldPublishReport = (process.env.REPORT !== '0') && !isDryRun;
@@ -1118,11 +1527,6 @@ Environment Variables:
     const dashboardTitle = 'authormark: Master Bot Status Dashboard';
     try {
       const existing = await issueClient.findTrackingIssue(config.owner, 'authormark-watch', 'authormark:');
-      const hasIssues =
-        summary.authormark.drifted.length > 0 ||
-        summary.authormark.unmarked.length > 0 ||
-        summary.lintFindings.length > 0 ||
-        summary.failedRepos.length > 0;
 
       if (existing) {
         log(`📝 Updating Master Bot status dashboard issue #${existing.number}...`);
@@ -1154,7 +1558,8 @@ Environment Variables:
 function buildMarkdownReport(config, summary) {
   const lines = [];
   const am = summary.authormark;
-  const problemsCount = am.drifted.length + am.unmarked.length + summary.lintFindings.length + summary.failedRepos.length;
+  const problemsCount = am.drifted.length + am.unmarked.length + summary.lintFindings.length +
+    (summary.securityAlerts ? summary.securityAlerts.length : 0) + summary.failedRepos.length;
 
   lines.push(`# Master Bot Account Dashboard (@${config.owner})`);
   lines.push(`\nScanned **${summary.total}** monitored repositories on \`${summary.scannedTime}\`.\n`);
@@ -1223,8 +1628,30 @@ function buildMarkdownReport(config, summary) {
         lines.push(`- ⚪ **Health & Standard Guidelines**:`);
         for (const s of item.standards) lines.push(`  - ${s}`);
       }
+      if (item.workflowRisks && item.workflowRisks.length > 0) {
+        lines.push(`- 🟣 **GitHub Actions Security**:`);
+        for (const s of item.workflowRisks) lines.push(`  - ${s}`);
+      }
+      if (item.historySecrets && item.historySecrets.length > 0) {
+        lines.push(`- 🔴 **Secrets in Git History**:`);
+        for (const s of item.historySecrets) lines.push(`  - ${s}`);
+      }
       lines.push('');
     }
+  }
+
+  // GitHub-native security alerts (Dependabot / code scanning / secret scanning)
+  if (summary.securityAlerts && summary.securityAlerts.length > 0) {
+    lines.push(`## 🛡️ GitHub Security Alerts`);
+    for (const a of summary.securityAlerts) {
+      const bits = [];
+      if (a.dependabot) bits.push(`${a.dependabot} Dependabot`);
+      if (a.codeScanning) bits.push(`${a.codeScanning} code-scanning`);
+      if (a.secretScanning) bits.push(`${a.secretScanning} secret-scanning`);
+      if (a.vulnerabilityAlertsDisabled) bits.push('Dependabot alerts disabled');
+      if (bits.length) lines.push(`- \`${a.name}\`: ${bits.join(', ')}`);
+    }
+    lines.push('');
   }
 
   // PR Tagging Summary
@@ -1264,8 +1691,23 @@ function buildMarkdownReport(config, summary) {
   return lines.join('\n');
 }
 
-main().catch(err => {
-  errLog(`Master Bot execution error: ${err.stack || err.message}`);
-  process.exit(1);
-});
+// Only run the supervisor when invoked directly, so tests can import the
+// classifiers and report builder without a network round-trip.
+const isMain = (() => {
+  try { return __filename === fs.realpathSync(process.argv[1]); } catch { return false; }
+})();
+
+if (isMain) {
+  main().catch(err => {
+    errLog(`Master Bot execution error: ${err.stack || err.message}`);
+    process.exit(1);
+  });
+}
+
+export {
+  loadConfig, applyRepoOverrides, sanitize, GitHubClient, lintRepository, walkFiles,
+  classifyPullRequest, classifyIssue, buildMarkdownReport,
+  auditWorkflow, scanGitHistory, pinWorkflowActions,
+  SECRET_PATTERNS,
+};
 

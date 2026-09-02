@@ -20,10 +20,12 @@ Operates autonomously on a daily schedule via GitHub Actions, or manually via CL
 - In **Fix Mode** (`--fix` / `FIX=1`), checks out an `authormark` branch, stamps unmarked or drifted files, commits as a bot, pushes, and opens/updates a clean Pull Request.
 
 ### 2. 🧹 Multi-Language Code Linting & Hygiene Scan
-- **Secret & Token Scanning**: Detects committed GitHub PATs, Firebase/Google API keys, AWS credentials, private keys, Slack/Discord webhooks, JWT tokens, and committed `.env` files.
+- **Secret & Token Scanning**: Detects committed GitHub PATs/OAuth, Firebase/Google API keys and OAuth client secrets, AWS credentials, PEM private keys, Slack/Stripe/npm tokens, Slack/Discord webhooks, JWTs, and committed `.env` files — in the working tree **and in git history** (`git log -G` prefilter).
+- **GitHub Actions Security Audit**: Flags `pull_request_target` + PR-head checkout, actions pinned to a tag instead of a commit SHA (auto-pins in Fix Mode), missing / `write-all` `permissions:`, untrusted `${{ github.event.* }}` in `run:` steps, and `curl | sh`.
+- **GitHub-native Alerts**: Aggregates open Dependabot, code-scanning and secret-scanning alert counts, and whether Dependabot alerts are disabled.
 - **Syntax & Manifest Validation**: Validates `.json` and manifest structure across projects.
 - **Hygiene & Cache Protection**: Detects and flags tracked `.pyc`, `__pycache__`, OS metadata (`.DS_Store`, `Thumbs.db`), and uncommitted build artifacts.
-- **Repository Health Standards**: Verifies presence and contents of `LICENSE`, `README.md`, `.gitignore`, `AGENTS.md` / `CLAUDE.md`, and `SECURITY.md`.
+- **Repository Health Standards**: Verifies `LICENSE`, `README.md`, `.gitignore`, `AGENTS.md` / `CLAUDE.md`, `SECURITY.md`, `CONTRIBUTING.md`, `.github/dependabot.yml`, and `package.json` ↔ `LICENSE` licence agreement. Fix Mode scaffolds the missing ones.
 
 ### 3. 🏷️ Automated PR Tagging & Labeling
 - Analyzes all open pull requests across all monitored repositories.
@@ -43,6 +45,10 @@ Operates autonomously on a daily schedule via GitHub Actions, or manually via CL
 
 ### 5. 📊 Consolidated Master Dashboard
 - Posts and maintains a single, non-spamming tracking issue on `authormark-watch` (`authormark: Master Bot Status Dashboard`), closing automatically once all repositories are clean.
+- Also appends the report to the **GitHub Actions job summary** (`$GITHUB_STEP_SUMMARY`) and, when `SLACK_WEBHOOK` / `DISCORD_WEBHOOK` (or `config.notify`) is set, posts a one-line status on findings.
+
+### 6. ⚙️ Per-repo overrides
+- A supervised repo may ship a `.masterbot.json` to set `{ "enabled": false }` or tune `features.{authormark,lint}.autoFix` for itself only.
 
 ---
 
@@ -137,8 +143,98 @@ FIX=1 ./watch.sh
 
 ---
 
+## AuthorMark CLI (`authormark.mjs`)
+
+The watermarking engine the bot drives. Zero dependencies, Node ≥ 18.
+
+```sh
+# One command for a fresh repo: config + key + CI + agent rules + LICENSE
+# + stamp every source file + mark images + seal manifest + pre-commit hook
+node authormark.mjs setup --author "Your Name" --email you@example.com --github https://github.com/you
+
+# Insert or refresh the header + keyed fingerprint (‑‑zw adds an invisible mark)
+node authormark.mjs stamp src lib --zw
+
+# CI / hook gate: exit 1 on any unmarked file or stale fingerprint
+node authormark.mjs check .
+node authormark.mjs check --staged           # pre-commit
+node authormark.mjs check --json .            # machine-readable report
+
+# Deliberate removal (licence change, upstreaming) — dry unless --force
+node authormark.mjs unstamp path/to/file.js --force
+
+# Hunt for stolen code: your fingerprints/signatures in repos you don't own
+GITHUB_TOKEN=ghp_… node authormark.mjs crawl --json
+
+# Tamper-evident manifest of per-file hashes + keyed proof
+node authormark.mjs seal
+node authormark.mjs verify
+
+# Images: PNG text chunks + optional visible mark + hidden LSB payload;
+# JPEG EXIF/XMP/COM metadata
+node authormark.mjs image logo.png --visible "© 2026 You" --inplace
+node authormark.mjs scan logo.png            # show every mark found
+```
+
+Layers, weakest to strongest: visible header comment → keyed HMAC `Fingerprint:`
+(survives whitespace/CRLF drift) → invisible zero-width mark (survives copy-paste)
+→ image metadata + LSB steganography → sealed `AUTHORSHIP.json` manifest.
+
+`image` also writes metadata-level marks for **GIF** (comment extension), **SVG**
+(`<metadata>` Dublin Core), **WebP** (`XMP ` chunk), **MP3** (ID3v2.4), **MP4/MOV**
+(`moov/udta` ©-atoms) and **PDF** (incremental-update `/Info` + XMP). These are
+metadata only — a re-encode can strip them. `authormark attack <image>` runs a
+battery of ImageMagick transforms and reports which marks survive which
+(re-encode, resize, crop, rotate, grayscale, `-strip`).
+
+Recognises ~90 source extensions across C-family, hash, `--`, `(* *)`, `//`, `;`
+and `%` comment syntaxes, plus named files (`Dockerfile`, `Rakefile`, …).
+`.v` and `.m` are excluded as ambiguous — add them via config `ext` if needed.
+
+### `.authormark.json` keys
+
+| key | meaning |
+|-----|---------|
+| `algo` | `hmac` (default) or `ed25519` — see below |
+| `publicKey` | base64 SPKI of the ed25519 public key (written by `init --ed25519`) |
+| `ignore` | array of paths / dir-prefixes / globs (`*`, `**`, `?`) never stamped |
+| `include` | if non-empty, an allowlist of globs — only matching files are stamped |
+| `reuse` | `true` adds a REUSE-spec `SPDX-FileCopyrightText:` line to each header |
+| `maxBytes` | files larger than this (default 2 MiB) are skipped by stamp/check |
+
+A `.authormarkignore` file (gitignore-style, one pattern per line) is merged into `ignore`.
+
+### HMAC vs ed25519
+
+- **`hmac`** (default): the `Fingerprint:` line is a keyed HMAC. Only the holder of
+  `~/.authormark.key` can verify authenticity; CI without the key does a
+  presence-only check.
+- **`ed25519`** (`authormark init --ed25519`): the header also carries a
+  `Signature:` line. The **public** key lives in `.authormark.json`, so CI and any
+  third party can cryptographically verify authorship with **no secret** —
+  `authormark check .` verifies signatures in the workflow. `seal`, the
+  `AUTHORSHIP.log` chain, and `verify` all use ed25519 proofs in this mode.
+  `rotate` mints a new keypair and keeps the retired public key so old
+  signatures still verify.
+
+---
+
 ## Architecture & Security
 
 - **Independent Checker**: `bot.mjs` runs from *this* repository and never trusts or executes foreign code inside target repositories.
 - **Zero Dependencies**: Pure Node.js standard library (`fs`, `path`, `crypto`, `child_process`, native `fetch`).
 - **Safe Push Mode**: Never pushes directly to default branches (`main`/`master`); all fixes are submitted via isolated branches and pull requests.
+
+---
+
+## Development
+
+```sh
+npm test                      # node:test unit suite (authormark + bot classifiers)
+node scripts/sync-vendor.mjs  # copy authormark.mjs -> .authormark/authormark.mjs
+node scripts/sync-vendor.mjs --check   # CI guard: fail if the two have drifted
+```
+
+`.github/workflows/ci.yml` runs the suite on Node 18/20/24, checks vendored-engine
+parity, and runs `authormark check --presence` on every push and PR.
+`.github/workflows/watch.yml` is the scheduled account-wide supervisor.
