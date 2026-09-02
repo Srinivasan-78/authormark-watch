@@ -20,10 +20,12 @@ Operates autonomously on a daily schedule via GitHub Actions, or manually via CL
 - In **Fix Mode** (`--fix` / `FIX=1`), checks out an `authormark` branch, stamps unmarked or drifted files, commits as a bot, pushes, and opens/updates a clean Pull Request.
 
 ### 2. 🧹 Multi-Language Code Linting & Hygiene Scan
-- **Secret & Token Scanning**: Detects committed GitHub PATs, Firebase/Google API keys, AWS credentials, private keys, Slack/Discord webhooks, JWT tokens, and committed `.env` files.
+- **Secret & Token Scanning**: Detects committed GitHub PATs/OAuth, Firebase/Google API keys and OAuth client secrets, AWS credentials, PEM private keys, Slack/Stripe/npm tokens, Slack/Discord webhooks, JWTs, and committed `.env` files — in the working tree **and in git history** (`git log -G` prefilter).
+- **GitHub Actions Security Audit**: Flags `pull_request_target` + PR-head checkout, actions pinned to a tag instead of a commit SHA (auto-pins in Fix Mode), missing / `write-all` `permissions:`, untrusted `${{ github.event.* }}` in `run:` steps, and `curl | sh`.
+- **GitHub-native Alerts**: Aggregates open Dependabot, code-scanning and secret-scanning alert counts, and whether Dependabot alerts are disabled.
 - **Syntax & Manifest Validation**: Validates `.json` and manifest structure across projects.
 - **Hygiene & Cache Protection**: Detects and flags tracked `.pyc`, `__pycache__`, OS metadata (`.DS_Store`, `Thumbs.db`), and uncommitted build artifacts.
-- **Repository Health Standards**: Verifies presence and contents of `LICENSE`, `README.md`, `.gitignore`, `AGENTS.md` / `CLAUDE.md`, and `SECURITY.md`.
+- **Repository Health Standards**: Verifies `LICENSE`, `README.md`, `.gitignore`, `AGENTS.md` / `CLAUDE.md`, `SECURITY.md`, `CONTRIBUTING.md`, `.github/dependabot.yml`, and `package.json` ↔ `LICENSE` licence agreement. Fix Mode scaffolds the missing ones.
 
 ### 3. 🏷️ Automated PR Tagging & Labeling
 - Analyzes all open pull requests across all monitored repositories.
@@ -43,6 +45,10 @@ Operates autonomously on a daily schedule via GitHub Actions, or manually via CL
 
 ### 5. 📊 Consolidated Master Dashboard
 - Posts and maintains a single, non-spamming tracking issue on `authormark-watch` (`authormark: Master Bot Status Dashboard`), closing automatically once all repositories are clean.
+- Also appends the report to the **GitHub Actions job summary** (`$GITHUB_STEP_SUMMARY`) and, when `SLACK_WEBHOOK` / `DISCORD_WEBHOOK` (or `config.notify`) is set, posts a one-line status on findings.
+
+### 6. ⚙️ Per-repo overrides
+- A supervised repo may ship a `.masterbot.json` to set `{ "enabled": false }` or tune `features.{authormark,lint}.autoFix` for itself only.
 
 ---
 

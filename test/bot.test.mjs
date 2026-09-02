@@ -16,7 +16,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
   classifyPullRequest, classifyIssue, sanitize,
-  buildMarkdownReport, lintRepository,
+  buildMarkdownReport, lintRepository, applyRepoOverrides,
   auditWorkflow, pinWorkflowActions, scanGitHistory,
 } from '../bot.mjs';
 
@@ -207,6 +207,45 @@ test('scanGitHistory surfaces a secret that was committed then deleted', () => {
     git('add', '-A'); git('commit', '-qm', 'remove key');
     const hits = scanGitHistory(dir);
     assert.ok(hits.some(h => /app\.js/.test(h) && /history/.test(h)));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- repo overrides
+
+test('applyRepoOverrides merges a repo .masterbot.json without losing defaults', () => {
+  const base = {
+    owner: 'x', features: {
+      authormark: { enabled: true, autoFix: true, branch: 'authormark' },
+      lint: { enabled: true, autoFix: true }, prTagger: {}, issueTagger: {},
+    },
+  };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-'));
+  try {
+    fs.writeFileSync(path.join(dir, '.masterbot.json'),
+      JSON.stringify({ features: { authormark: { autoFix: false } } }));
+    const o = applyRepoOverrides(base, dir);
+    assert.equal(o.features.authormark.autoFix, false);
+    assert.equal(o.features.authormark.branch, 'authormark'); // preserved
+    assert.equal(o.features.lint.autoFix, true);              // untouched
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('applyRepoOverrides returns the same object when no override file exists', () => {
+  const base = { owner: 'x', features: { authormark: {}, lint: {}, prTagger: {}, issueTagger: {} } };
+  assert.equal(applyRepoOverrides(base, os.tmpdir()), base);
+});
+
+test('lintRepository flags a package.json/LICENSE licence mismatch', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lic-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', license: 'Apache-2.0' }));
+    fs.writeFileSync(path.join(dir, 'LICENSE'), 'MIT License\n\nPermission is hereby granted, free of charge...\n');
+    const f = lintRepository(dir, 'x');
+    assert.ok(f.standards.some(s => /license "Apache-2\.0" but LICENSE is MIT/.test(s)));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
