@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.EsCUDnfFCrLJfPyXOtv2QI
+ * Fingerprint: AMK1.f_nIYmZolkQRtZsW4pXtBZ
  */
 // Unit tests for the pure classifiers, linter and report builder in bot.mjs.
 
@@ -139,14 +139,15 @@ test('classifyBranchPr distinguishes merged / open / closed-unmerged / none', ()
 
 // ---------------------------------------------------------------- buildDependabotConfig
 
-test('buildDependabotConfig groups every ecosystem and caps open PRs', () => {
+test('buildDependabotConfig groups every ecosystem into one catch-all PR', () => {
   const yml = buildDependabotConfig(['npm', 'github-actions']);
   assert.match(yml, /package-ecosystem: "npm"/);
   assert.match(yml, /package-ecosystem: "github-actions"/);
-  assert.match(yml, /npm-minor-patch:/);
-  assert.match(yml, /github-actions-minor-patch:/);
+  assert.match(yml, /npm-all:/);
+  assert.match(yml, /github-actions-all:/);
   assert.match(yml, /open-pull-requests-limit: 10/);
-  assert.match(yml, /update-types: \["minor", "patch"\]/);
+  assert.match(yml, /patterns: \["\*"\]/);
+  assert.match(yml, /update-types: \["major", "minor", "patch"\]/);
   // Two ecosystems -> two grouped blocks.
   assert.equal((yml.match(/groups:/g) || []).length, 2);
 });
