@@ -7,7 +7,7 @@
 -->
 # authormark-watch (Master Bot & Repository Supervisor)
 
-A centralized **Master Bot** that supervises, maintains, and secures **every repository** in your GitHub account (`@Srinivasan-78`), including flagship repositories like `automatch`, new repositories, and legacy projects.
+A centralized **Master Bot** that supervises, maintains, and secures **every repository** in your GitHub account (`@Srinivasan-78`), including active repositories, new repositories, and legacy projects.
 
 Operates autonomously on a daily schedule via GitHub Actions, or manually via CLI.
 
@@ -41,10 +41,7 @@ Operates autonomously on a daily schedule via GitHub Actions, or manually via CL
   - **Priority & Triage**: `triage`, `needs-info`, `good first issue`, `priority/high`, `priority/medium`, `priority/low`.
 - Ensures issue labels exist with proper colors.
 
-### 5. 🎯 Flagship `automatch` Dedicated Monitor
-- Dedicated status monitoring, health inspection, and custom configuration for the `automatch` repository alongside all other account repos.
-
-### 6. 📊 Consolidated Master Dashboard
+### 5. 📊 Consolidated Master Dashboard
 - Posts and maintains a single, non-spamming tracking issue on `authormark-watch` (`authormark: Master Bot Status Dashboard`), closing automatically once all repositories are clean.
 
 ---
@@ -57,7 +54,7 @@ Configure repository rules, features, and labeling in `bot.config.json`:
 {
   "owner": "Srinivasan-78",
   "repos": {
-    "include": ["automatch"],
+    "include": [],
     "exclude": [
       "wix-installer-template",
       "ubisoft-game-notes",
@@ -125,8 +122,8 @@ node bot.mjs --all
 # Run AuthorMark fix pass (opens PRs on unmarked/drifted repos)
 node bot.mjs --fix
 
-# Target a specific repository (e.g. automatch)
-node bot.mjs --repo automatch
+# Target a specific repository (e.g. my-repo)
+node bot.mjs --repo my-repo
 
 # Run individual subsystems
 node bot.mjs --lint

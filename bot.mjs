@@ -15,8 +15,7 @@
  *  2. Multi-Language Code Linting & Repository Hygiene (Secrets, Syntax, Artifacts, Standards)
  *  3. Automated PR Tagging & Labeling (Size, Type, Languages, Workflow status)
  *  4. Automated Issue Tagging & Triage (Categories, Priorities, Needs-info, Good first issue)
- *  5. Flagship `automatch` Dedicated Monitoring
- *  6. Consolidated Master Dashboard & Status Issue Management
+ *  5. Consolidated Master Dashboard & Status Issue Management
  *
  * Zero dependencies. Node >= 18.
  */
@@ -41,7 +40,7 @@ function loadConfig() {
   const defaults = {
     owner: 'Srinivasan-78',
     repos: {
-      include: ['automatch'],
+      include: [],
       exclude: ['wix-installer-template', 'ubisoft-game-notes', 'github-actions-snippets', 'study-brainrot-generator'],
       skip: ['authormark-watch'],
       includeForks: false,
@@ -798,7 +797,7 @@ Options:
   --lint           Run multi-language code linting & hygiene checks
   --tag-prs        Run automated PR tagging & labeling across repos
   --tag-issues     Run automated issue tagging & triage across repos
-  --repo <name>    Target a single repository (e.g. --repo automatch)
+  --repo <name>    Target a single repository (e.g. --repo my-repo)
   --dry-run        Print findings and reports without applying changes or modifying issues
   --help           Show this help message
 
@@ -866,7 +865,7 @@ Environment Variables:
     }
   }
 
-  // Ensure explicitly included repos like automatch are present in the list
+  // Ensure explicitly included repos are present in the list
   const repoNameSet = new Set(repos.map(r => r.name.toLowerCase()));
   for (const inc of config.repos.include || []) {
     if (!repoNameSet.has(inc.toLowerCase())) {
@@ -896,7 +895,6 @@ Environment Variables:
   const summary = {
     total: filteredRepos.length,
     scannedTime: new Date().toISOString(),
-    automatchStatus: null,
     authormark: { clean: [], drifted: [], unmarked: [], fixed: [], fixFailed: [] },
     lintFindings: [],
     lintFixed: [],
@@ -908,9 +906,8 @@ Environment Variables:
   // Process Each Repository
   for (const repoInfo of filteredRepos) {
     const name = repoInfo.name;
-    const isAutomatch = name.toLowerCase() === 'automatch';
     log(`\n==================================================`);
-    log(`🔍 Inspecting repository: ${name}${isAutomatch ? ' [FLAGSHIP REPO]' : ''}`);
+    log(`🔍 Inspecting repository: ${name}`);
 
     let repoDir = path.join(path.dirname(__dirname), name);
     let isClonedTemp = false;
@@ -927,7 +924,6 @@ Environment Variables:
       } catch (err) {
         warn(`Could not clone ${name}: ${sanitize(err.message)}`);
         summary.failedRepos.push({ name, reason: 'Clone failed or repository is inaccessible' });
-        if (isAutomatch) summary.automatchStatus = { error: 'Failed to clone automatch repository' };
         continue;
       }
     }
@@ -1102,16 +1098,6 @@ Environment Variables:
         warn(`Could not inspect issues for ${name}: ${issueErr.message}`);
       }
     }
-
-    // Capture automatch flagship status
-    if (isAutomatch) {
-      summary.automatchStatus = {
-        authormark: amResult.status,
-        authormarkDetails: amResult.details,
-        lint: lintRes,
-        fixPrUrl,
-      };
-    }
   }
 
   // Clean up temporary workspace
@@ -1177,23 +1163,6 @@ function buildMarkdownReport(config, summary) {
     lines.push(`> 🟢 **All Systems Nominal**: Every monitored repository is watermarked, code-linted, and up to date.\n`);
   } else {
     lines.push(`> ⚠️ **Attention Needed**: Found items requiring review across **${problemsCount}** checks.\n`);
-  }
-
-  // Flagship Automatch Section
-  if (summary.automatchStatus) {
-    lines.push(`## 🎯 Flagship Watch: \`automatch\``);
-    const ast = summary.automatchStatus;
-    if (ast.error) {
-      lines.push(`- ❌ **Status**: ${ast.error}`);
-    } else {
-      lines.push(`- **AuthorMark Status**: \`${ast.authormark}\` (${ast.authormarkDetails})`);
-      if (ast.fixPrUrl) lines.push(`- **Fix PR**: [View PR](${ast.fixPrUrl})`);
-      if (ast.lint) {
-        const lCount = ast.lint.secrets.length + ast.lint.syntaxErrors.length + ast.lint.standards.length;
-        lines.push(`- **Hygiene & Standards**: ${lCount === 0 ? '✅ Clean' : `⚠️ ${lCount} findings`}`);
-      }
-    }
-    lines.push('');
   }
 
   // AuthorMark Section

@@ -28,7 +28,7 @@ on:
         type: boolean
         default: true
       target_repo:
-        description: 'Specific repository to target (leave blank to supervise all repos including automatch)'
+        description: 'Specific repository to target (leave blank to supervise all repos)'
         type: string
         default: ''
 

@@ -9,7 +9,6 @@
 #  - Multi-language code linting & repository hygiene
 #  - Automated PR tagging & labeling
 #  - Automated issue tagging & triage
-#  - Flagship automatch watch
 #  - Account-wide dashboard issue management
 set -uo pipefail
 
