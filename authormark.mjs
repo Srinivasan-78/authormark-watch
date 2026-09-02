@@ -29,31 +29,56 @@ const FP_LABEL = 'Fingerprint: AMK1.';
 const SKIP_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'out', 'coverage', '.turbo',
   '.vercel', 'vendor', '__pycache__', 'venv', 'site-packages', 'third_party', 'target', '.mypy_cache']);
 
-const DEFAULT_EXTS = ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.css', '.scss', '.sass', '.less',
-  '.py', '.go', '.rs', '.java', '.kt', '.swift', '.c', '.h', '.cpp', '.hpp', '.cs', '.php', '.rb',
-  '.sh', '.bash', '.zsh', '.sql', '.lua', '.html', '.htm', '.svg', '.vue', '.svelte', '.md', '.yml', '.yaml', '.toml',
-  '.bat', '.cmd', '.ps1', '.psm1', '.tf', '.tfvars', '.hcl', '.r', '.pl'];
+const DEFAULT_EXTS = ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts', '.css', '.scss', '.sass', '.less',
+  '.py', '.pyi', '.go', '.rs', '.java', '.kt', '.kts', '.swift', '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.mm',
+  '.cs', '.php', '.rb', '.sh', '.bash', '.zsh', '.fish', '.sql', '.lua', '.html', '.htm', '.svg', '.vue', '.svelte',
+  '.astro', '.md', '.mdx', '.yml', '.yaml', '.toml', '.bat', '.cmd', '.ps1', '.psm1', '.tf', '.tfvars', '.hcl',
+  '.r', '.pl', '.pm', '.dart', '.scala', '.sc', '.groovy', '.gradle', '.d', '.cr', '.nim', '.jl', '.ex', '.exs',
+  '.erl', '.hrl', '.clj', '.cljs', '.cljc', '.edn', '.hs', '.elm', '.sol', '.proto', '.graphql', '.gql',
+  '.fs', '.fsx', '.fsi', '.ml', '.mli', '.res', '.resi', '.zig', '.sv', '.svh', '.vhd', '.vhdl',
+  '.cmake', '.tcl', '.rkt'];
+// Deliberately excluded -- the extension names two languages with incompatible
+// comment syntax: .v (Verilog vs Coq), .m (Objective-C vs MATLAB). Opt in per
+// repo via the config `ext` list if you know which one you mean.
 
 // Extensionless files worth stamping, matched by basename.
-const NAMED_FILES = new Set(['Dockerfile', 'Makefile', 'Jenkinsfile', 'Vagrantfile', 'Procfile']);
+const NAMED_FILES = new Set(['Dockerfile', 'Containerfile', 'Makefile', 'GNUmakefile', 'Jenkinsfile',
+  'Vagrantfile', 'Procfile', 'Rakefile', 'Gemfile', 'Guardfile', 'Brewfile', 'Berksfile',
+  'Fastfile', 'Appfile', 'Podfile', 'CMakeLists.txt']);
 
 // ---------------------------------------------------------------- comment styles
 
-const BLOCK = { open: '/*!', line: ' * ', close: ' */' };
+const BLOCK = { open: '/*!', line: ' * ', close: ' */' };  // C-family; valid wherever // works too
 const HTML = { open: '<!--', line: '  ', close: '-->' };
+const PAREN = { open: '(*', line: ' * ', close: ' *)' };   // OCaml, F#, Pascal
+const HASH = { prefix: '# ' };
+const DASH = { prefix: '-- ' };                            // Haskell, Elm, Ada, SQL, Lua
+const SLASH = { prefix: '// ' };                           // Zig -- no block comment
+const SEMI = { prefix: '; ' };                             // Lisp / Clojure / Scheme
+const PCT = { prefix: '% ' };                              // Erlang
+const REM = { prefix: 'REM ' };
 const STYLES = {
-  '.js': BLOCK, '.jsx': BLOCK, '.ts': BLOCK, '.tsx': BLOCK, '.mjs': BLOCK, '.cjs': BLOCK,
+  '.js': BLOCK, '.jsx': BLOCK, '.ts': BLOCK, '.tsx': BLOCK, '.mjs': BLOCK, '.cjs': BLOCK, '.mts': BLOCK, '.cts': BLOCK,
   '.css': BLOCK, '.scss': BLOCK, '.sass': BLOCK, '.less': BLOCK, '.go': BLOCK, '.rs': BLOCK,
-  '.java': BLOCK, '.kt': BLOCK, '.swift': BLOCK, '.c': BLOCK, '.h': BLOCK, '.cpp': BLOCK,
-  '.hpp': BLOCK, '.cs': BLOCK, '.php': BLOCK, '.lua': { prefix: '-- ' }, '.sql': { prefix: '-- ' },
-  '.py': { prefix: '# ' }, '.rb': { prefix: '# ' }, '.sh': { prefix: '# ' }, '.bash': { prefix: '# ' },
-  '.zsh': { prefix: '# ' }, '.yml': { prefix: '# ' }, '.yaml': { prefix: '# ' }, '.toml': { prefix: '# ' },
-  '.html': HTML, '.htm': HTML, '.svg': HTML, '.vue': HTML, '.svelte': HTML, '.md': HTML,
-  '.bat': { prefix: 'REM ' }, '.cmd': { prefix: 'REM ' },
-  '.ps1': { prefix: '# ' }, '.psm1': { prefix: '# ' }, '.pl': { prefix: '# ' }, '.r': { prefix: '# ' },
-  '.tf': { prefix: '# ' }, '.tfvars': { prefix: '# ' }, '.hcl': { prefix: '# ' },
-  Dockerfile: { prefix: '# ' }, Makefile: { prefix: '# ' }, Procfile: { prefix: '# ' },
-  Vagrantfile: { prefix: '# ' }, Jenkinsfile: BLOCK,
+  '.java': BLOCK, '.kt': BLOCK, '.kts': BLOCK, '.swift': BLOCK, '.c': BLOCK, '.h': BLOCK, '.cpp': BLOCK,
+  '.hpp': BLOCK, '.cc': BLOCK, '.cxx': BLOCK, '.mm': BLOCK, '.cs': BLOCK, '.php': BLOCK,
+  '.dart': BLOCK, '.scala': BLOCK, '.sc': BLOCK, '.groovy': BLOCK, '.gradle': BLOCK, '.d': BLOCK,
+  '.sol': BLOCK, '.proto': BLOCK, '.res': BLOCK, '.resi': BLOCK, '.sv': BLOCK, '.svh': BLOCK,
+  '.lua': DASH, '.sql': DASH, '.hs': DASH, '.elm': DASH, '.vhd': DASH, '.vhdl': DASH,
+  '.py': HASH, '.pyi': HASH, '.rb': HASH, '.sh': HASH, '.bash': HASH, '.zsh': HASH, '.fish': HASH,
+  '.yml': HASH, '.yaml': HASH, '.toml': HASH, '.pl': HASH, '.pm': HASH, '.r': HASH, '.cr': HASH,
+  '.nim': HASH, '.jl': HASH, '.ex': HASH, '.exs': HASH, '.tf': HASH, '.tfvars': HASH, '.hcl': HASH,
+  '.graphql': HASH, '.gql': HASH, '.cmake': HASH, '.tcl': HASH, '.ps1': HASH, '.psm1': HASH,
+  '.html': HTML, '.htm': HTML, '.svg': HTML, '.vue': HTML, '.svelte': HTML, '.astro': HTML,
+  '.md': HTML, '.mdx': HTML,
+  '.fs': PAREN, '.fsx': PAREN, '.fsi': PAREN, '.ml': PAREN, '.mli': PAREN,
+  '.zig': SLASH,
+  '.clj': SEMI, '.cljs': SEMI, '.cljc': SEMI, '.edn': SEMI, '.rkt': SEMI,
+  '.erl': PCT, '.hrl': PCT,
+  '.bat': REM, '.cmd': REM,
+  Dockerfile: HASH, Containerfile: HASH, Makefile: HASH, GNUmakefile: HASH, Procfile: HASH,
+  Vagrantfile: HASH, Rakefile: HASH, Gemfile: HASH, Guardfile: HASH, Brewfile: HASH, Berksfile: HASH,
+  Fastfile: HASH, Appfile: HASH, Podfile: HASH, 'CMakeLists.txt': HASH, Jenkinsfile: BLOCK,
 };
 
 // Basename wins over extension, so `Dockerfile` and `Makefile` are handled.
@@ -61,16 +86,60 @@ const styleFor = rel => STYLES[path.basename(rel)] || STYLES[path.extname(rel)] 
 
 // ---------------------------------------------------------------- config + key
 
+const IGNORE_FILE = '.authormarkignore';
+
+// gitignore-lite: drop blank lines and #comments; each remaining line is an
+// ignore pattern understood by ignored() (exact path, dir prefix, or glob).
+function readIgnoreFile() {
+  const p = path.join(CWD, IGNORE_FILE);
+  if (!fs.existsSync(p)) return [];
+  return fs.readFileSync(p, 'utf8').split('\n')
+    .map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+}
+
 function loadConfig() {
   const p = path.join(CWD, CONFIG_FILE);
   if (!fs.existsSync(p)) die(`no ${CONFIG_FILE} here -- run:  authormark init`);
-  return JSON.parse(fs.readFileSync(p, 'utf8'));
+  const g = globalDefaults();
+  const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+  cfg.ignore = [...(cfg.ignore || []), ...readIgnoreFile()];
+  cfg.include = cfg.include || [];              // if non-empty, a file must match one glob
+  if (cfg.reuse === undefined) cfg.reuse = g.reuse ?? false;
+  if (cfg.maxBytes === undefined) cfg.maxBytes = g.maxBytes ?? 2 * 1024 * 1024;
+  return cfg;
 }
 
 // Machine-wide defaults, so every new repo gets the same identity without flags.
 function globalDefaults() {
   try { return JSON.parse(fs.readFileSync(path.join(os.homedir(), CONFIG_FILE), 'utf8')); }
   catch { return {}; }
+}
+
+// Glob: `*` matches a run of non-slash characters, `**` matches a run that may
+// include slashes, `?` matches one non-slash character. A trailing slash is
+// dropped. Anchored at the start; matches the path itself or a parent dir.
+function matchGlob(rel, pattern) {
+  const norm = rel.split(path.sep).join('/');
+  const pat = pattern.split(path.sep).join('/').replace(/\/+$/, '');
+  let rx = '';
+  for (let i = 0; i < pat.length; i++) {
+    const c = pat[i];
+    if (c === '*') {
+      if (pat[i + 1] === '*') {
+        // `**/` = zero or more leading path segments; bare `**` = anything.
+        if (pat[i + 2] === '/') { rx += '(?:.*/)?'; i += 2; } else { rx += '.*'; i += 1; }
+      } else {
+        rx += '[^/]*';
+      }
+    } else if (c === '?') {
+      rx += '[^/]';
+    } else if ('.+^${}()|[]\\'.includes(c)) {
+      rx += '\\' + c;
+    } else {
+      rx += c;
+    }
+  }
+  return new RegExp('^' + rx + '(/|$)').test(norm);
 }
 
 function keyPath(cfg) {
@@ -96,11 +165,14 @@ function fingerprint(key, body) {
 // ---------------------------------------------------------------- header build / strip
 
 function headerLines(cfg, fp) {
+  const who = `${cfg.year} ${cfg.author}${cfg.email ? ` <${cfg.email}>` : ''}`;
   const l = [
     `${SENTINEL} ${NOREMOVE} (authorship watermark)`,
-    `Copyright (c) ${cfg.year} ${cfg.author}${cfg.email ? ` <${cfg.email}>` : ''}`,
+    `Copyright (c) ${who}`,
     `Author: ${cfg.github}`,
   ];
+  // REUSE-spec (reuse.software) machine-readable copyright line, opt-in via config.
+  if (cfg.reuse) l.push(`SPDX-FileCopyrightText: ${who}`);
   if (cfg.license) l.push(`SPDX-License-Identifier: ${cfg.license}`);
   l.push(`${FP_LABEL}${fp}`);
   return l;
@@ -113,11 +185,11 @@ function renderHeader(cfg, fp, style, zw) {
   return [style.open, ...lines.map(l => style.line + l), style.close].join('\n') + '\n';
 }
 
-// A header we wrote is at most 5 lines plus its delimiters; never scan further.
+// A header we wrote is at most 6 lines plus its delimiters; never scan further.
 // Without this bound a sentinel line whose `Fingerprint:` was deleted would make
 // the search run to EOF and stamp would then overwrite the whole file with a header.
-const HEADER_MAX_LINES = 8;
-const HEADER_FIELD = /(Copyright \(c\)|Author:|SPDX-License-Identifier:|Fingerprint: )/;
+const HEADER_MAX_LINES = 10;
+const HEADER_FIELD = /(Copyright \(c\)|Author:|SPDX-File(?:CopyrightText|Contributor):|SPDX-License-Identifier:|Fingerprint: )/;
 
 // Returns {header, body} -- header is '' when the file is unstamped.
 function splitHeader(text) {
@@ -201,10 +273,23 @@ function walk(target, exts, acc = []) {
 
 // Never enforce marks on generated output or vendored/third-party content.
 function ignored(rel, cfg) {
-  const segs = rel.split(path.sep).join('/').split('/');
+  const norm = rel.split(path.sep).join('/');
+  const segs = norm.split('/');
   if (segs.some(s => SKIP_DIRS.has(s))) return true;
   if (segs.slice(0, -1).some(s => s.startsWith('.') && s !== '.github')) return true;
-  return (cfg?.ignore || []).some(p => rel === p || rel.startsWith(p.replace(/\/+$/, '') + '/'));
+  return (cfg?.ignore || []).some(p =>
+    rel === p ||
+    norm === p ||
+    norm.startsWith(p.replace(/\/+$/, '') + '/') ||
+    ((p.includes('*') || p.includes('?')) && matchGlob(rel, p)));
+}
+
+// An `include` list (globs) turns collection into an allowlist: a file must
+// match at least one pattern to be stamped/checked. Empty list = stamp all.
+function includedBy(rel, cfg) {
+  const inc = cfg?.include || [];
+  if (inc.length === 0) return true;
+  return inc.some(p => matchGlob(rel, p) || rel === p || rel.split(path.sep).join('/') === p);
 }
 
 function collect(paths, exts, cfg) {
@@ -214,7 +299,7 @@ function collect(paths, exts, cfg) {
     if (!fs.existsSync(t)) { warn(`skip (missing): ${t}`); continue; }
     for (const f of walk(t, exts)) {
       const rel = path.relative(CWD, f);
-      if (!ignored(rel, cfg)) files.add(rel);
+      if (!ignored(rel, cfg) && includedBy(rel, cfg)) files.add(rel);
     }
   }
   return [...files].sort();
@@ -228,7 +313,13 @@ function cmdInit(args) {
   const email = flag(args, '--email') || g.email || tryGit('user.email') || '';
   const github = flag(args, '--github') || g.github || '';
   const license = flag(args, '--license') || g.license || 'MIT';
-  const cfg = { author, email, github, year: new Date().getFullYear(), license, keyFile: '~/.authormark.key', ignore: [] };
+  const cfg = {
+    author, email, github, year: new Date().getFullYear(), license,
+    keyFile: '~/.authormark.key',
+    ignore: [], include: [],
+    reuse: flag(args, '--reuse') === 'true' || args.includes('--reuse') || g.reuse || false,
+    maxBytes: g.maxBytes ?? 2 * 1024 * 1024,
+  };
   fs.writeFileSync(path.join(CWD, CONFIG_FILE), JSON.stringify(cfg, null, 2) + '\n');
   const kp = keyPath(cfg);
   if (fs.existsSync(kp)) {
@@ -247,9 +338,10 @@ function cmdStamp(args) {
   const zw = args.includes('--zw');
   const dry = args.includes('--dry');
   const files = collect(positional(args), exts, cfg);
-  let added = 0, refreshed = 0, same = 0;
+  let added = 0, refreshed = 0, same = 0, skipped = 0;
 
   for (const rel of files) {
+    if (tooBig(rel, cfg)) { skipped++; continue; }
     const orig = fs.readFileSync(rel, 'utf8');
     const style = styleFor(rel);
     const { header, body } = splitHeader(orig);
@@ -263,7 +355,29 @@ function cmdStamp(args) {
     header ? refreshed++ : added++;
     if (dry) log(`would ${header ? 'refresh' : 'stamp'}: ${rel}`);
   }
-  log(`${dry ? '[dry] ' : ''}stamped ${added}, refreshed ${refreshed}, unchanged ${same}  (${files.length} files)`);
+  log(`${dry ? '[dry] ' : ''}stamped ${added}, refreshed ${refreshed}, unchanged ${same}` +
+    `${skipped ? `, skipped ${skipped} (too large)` : ''}  (${files.length} files)`);
+}
+
+// Files above cfg.maxBytes are left alone -- a watermark in a giant generated
+// blob or a checked-in asset is noise, and reading it wastes memory.
+function tooBig(rel, cfg) {
+  try { return fs.statSync(rel).size > (cfg?.maxBytes ?? 2 * 1024 * 1024); }
+  catch { return false; }
+}
+
+// Streamed SHA-256 so `seal` can cover files of any size.
+function hashFile(rel) {
+  const h = crypto.createHash('sha256');
+  const fd = fs.openSync(rel, 'r');
+  const buf = Buffer.alloc(1 << 20);
+  let bytes = 0, n;
+  try {
+    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) { h.update(buf.subarray(0, n)); bytes += n; }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return { hash: h.digest('hex'), bytes };
 }
 
 // Deliberate, auditable removal -- for a licence change or upstreaming a file.
@@ -309,7 +423,11 @@ function cmdCheck(args) {
     files = collect(positional(args), exts, cfg);
   }
   const missing = [], tampered = [];
+  let skipped = 0;
   for (const rel of files) {
+    // Stay consistent with stamp: it never marks files this large, so check
+    // must not demand a mark on them either.
+    if (tooBig(rel, cfg)) { skipped++; continue; }
     const text = fs.readFileSync(rel, 'utf8');
     const { header, body } = splitHeader(text);
     if (!header) { missing.push(rel); continue; }
@@ -322,7 +440,7 @@ function cmdCheck(args) {
   if (args.includes('--json')) {
     process.stdout.write(JSON.stringify({
       ok, mode: presence ? 'presence' : 'verified',
-      total: files.length, missing, stale: tampered,
+      total: files.length, skipped, missing, stale: tampered,
     }, null, 2) + '\n');
     if (!ok) process.exit(1);
     return;
@@ -342,8 +460,10 @@ function cmdSeal(args) {
   const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
   const files = collect(positional(args), exts, cfg);
   const entries = files.map(rel => {
-    const buf = fs.readFileSync(rel);
-    return { path: rel, sha256: crypto.createHash('sha256').update(buf).digest('hex'), bytes: buf.length };
+    // Seal every collected file regardless of size, but hash big ones in
+    // chunks so a large asset can't blow the heap.
+    const { hash, bytes } = hashFile(rel);
+    return { path: rel, sha256: hash, bytes };
   });
   const digest = crypto.createHash('sha256')
     .update(entries.map(e => `${e.sha256}  ${e.path}`).join('\n')).digest('hex');
@@ -376,8 +496,7 @@ function cmdVerify(args) {
   let changed = 0, missing = 0;
   for (const e of m.files) {
     if (!fs.existsSync(e.path)) { missing++; console.error(`  gone:    ${e.path}`); continue; }
-    const h = crypto.createHash('sha256').update(fs.readFileSync(e.path)).digest('hex');
-    if (h !== e.sha256) { changed++; console.error(`  changed: ${e.path}`); }
+    if (hashFile(e.path).hash !== e.sha256) { changed++; console.error(`  changed: ${e.path}`); }
   }
   log(`${m.fileCount} sealed, ${changed} changed, ${missing} gone since ${m.sealedAt}`);
   if (!proofOk || digest !== m.digest) process.exit(1);
@@ -1006,12 +1125,14 @@ const USAGE = `authormark -- layered authorship watermarking
        ONE COMMAND for a new repo: init + vendor + CI + agent rules + LICENSE
        + stamp + images + seal + pre-commit hook. Idempotent -- rerun anytime.
 
-  init [--author N] [--email E] [--github U] [--license L]
+  init [--author N] [--email E] [--github U] [--license L] [--reuse]
        create .authormark.json + your secret HMAC key (~/.authormark.key)
+       --reuse also emits a REUSE-spec SPDX-FileCopyrightText line
 
   stamp <paths...> [--ext .ts,.tsx] [--zw] [--dry]
        insert/refresh the copyright header + keyed fingerprint in source files
        --zw also plants an invisible zero-width mark that survives copy-paste
+       honours .authormarkignore plus the config include / maxBytes settings
 
   unstamp <paths...> [--ext ...] [--force]
        remove the header block (licence change / upstreaming). Dry unless --force.
@@ -1059,5 +1180,6 @@ if (isMain) runCli(process.argv.slice(2));
 export {
   canonical, fingerprint, zwEncode, zwDecode, splitHeader, insertIndex,
   styleFor, renderHeader, headerLines, isHeaderLine, crc32, textMask,
-  lsbEmbed, lsbExtract, buildExif, collect, ignored, runCli,
+  lsbEmbed, lsbExtract, buildExif, collect, ignored, includedBy, matchGlob,
+  tooBig, hashFile, runCli,
 };

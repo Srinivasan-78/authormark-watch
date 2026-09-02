@@ -171,6 +171,21 @@ Layers, weakest to strongest: visible header comment → keyed HMAC `Fingerprint
 (survives whitespace/CRLF drift) → invisible zero-width mark (survives copy-paste)
 → image metadata + LSB steganography → sealed `AUTHORSHIP.json` manifest.
 
+Recognises ~90 source extensions across C-family, hash, `--`, `(* *)`, `//`, `;`
+and `%` comment syntaxes, plus named files (`Dockerfile`, `Rakefile`, …).
+`.v` and `.m` are excluded as ambiguous — add them via config `ext` if needed.
+
+### `.authormark.json` keys
+
+| key | meaning |
+|-----|---------|
+| `ignore` | array of paths / dir-prefixes / globs (`*`, `**`, `?`) never stamped |
+| `include` | if non-empty, an allowlist of globs — only matching files are stamped |
+| `reuse` | `true` adds a REUSE-spec `SPDX-FileCopyrightText:` line to each header |
+| `maxBytes` | files larger than this (default 2 MiB) are skipped by stamp/check |
+
+A `.authormarkignore` file (gitignore-style, one pattern per line) is merged into `ignore`.
+
 ---
 
 ## Architecture & Security

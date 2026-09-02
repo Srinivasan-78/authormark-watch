@@ -14,6 +14,7 @@ import { Buffer } from 'node:buffer';
 import {
   canonical, fingerprint, zwEncode, zwDecode, splitHeader, insertIndex,
   styleFor, renderHeader, headerLines, isHeaderLine, crc32,
+  matchGlob, includedBy, ignored,
 } from '../authormark.mjs';
 
 const KEY = Buffer.alloc(32, 7);
@@ -67,6 +68,51 @@ test('styleFor picks comment syntax by basename then extension', () => {
   assert.equal(styleFor('script.py').prefix, '# ');
   assert.equal(styleFor('Dockerfile').prefix, '# ');
   assert.equal(styleFor('page.html').open, '<!--');
+});
+
+test('styleFor covers the added languages with the right comment shape', () => {
+  assert.equal(styleFor('main.zig').prefix, '// ');   // no block comment in Zig
+  assert.equal(styleFor('lib.ml').open, '(*');        // OCaml has no // comment
+  assert.equal(styleFor('core.clj').prefix, '; ');
+  assert.equal(styleFor('node.erl').prefix, '% ');
+  assert.equal(styleFor('Model.hs').prefix, '-- ');
+  assert.equal(styleFor('Contract.sol').open, '/*!');
+  assert.equal(styleFor('Rakefile').prefix, '# ');
+});
+
+test('matchGlob: * stays within a path segment, ** crosses segments', () => {
+  assert.ok(matchGlob('a.test.ts', '*.test.ts'));
+  assert.ok(!matchGlob('sub/a.test.ts', '*.test.ts'));
+  assert.ok(matchGlob('src/a/b/c.js', 'src/**/*.js'));
+  assert.ok(matchGlob('vendor/x/y.js', 'vendor/'));
+  assert.ok(!matchGlob('vendored.js', 'vendor/'));
+  assert.ok(matchGlob('build/out.min.js', 'build/*.min.js'));
+});
+
+test('ignored() honours glob patterns from config', () => {
+  const cfg = { ignore: ['**/*.gen.ts', 'legacy/'] };
+  assert.ok(ignored('src/api/types.gen.ts', cfg));
+  assert.ok(ignored('legacy/old.js', cfg));
+  assert.ok(!ignored('src/api/types.ts', cfg));
+});
+
+test('includedBy() is an allowlist only when include is non-empty', () => {
+  assert.ok(includedBy('anything.js', { include: [] }));
+  assert.ok(includedBy('src/app.ts', { include: ['src/**/*.ts'] }));
+  assert.ok(!includedBy('test/app.ts', { include: ['src/**/*.ts'] }));
+});
+
+test('headerLines emits a REUSE SPDX-FileCopyrightText line when reuse is set', () => {
+  const l = headerLines({ ...CFG, reuse: true }, 'z'.repeat(22));
+  assert.ok(l.some(x => x === 'SPDX-FileCopyrightText: 2026 Ada Lovelace <ada@example.com>'));
+  assert.ok(!headerLines(CFG, 'z'.repeat(22)).some(x => x.startsWith('SPDX-FileCopyrightText')));
+});
+
+test('splitHeader still recovers the body when a REUSE line is present', () => {
+  const body = 'const x = 1\n';
+  const fp = fingerprint(KEY, body);
+  const head = renderHeader({ ...CFG, reuse: true }, fp, styleFor('a.js'), false);
+  assert.equal(splitHeader(head + body).body, body);
 });
 
 test('insertIndex keeps the header below a shebang / front-matter / doctype', () => {
