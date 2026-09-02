@@ -91,6 +91,26 @@ function sanitize(text) {
   return String(text).replace(/(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, '***');
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Exponential backoff with full jitter, capped at 30s.
+function backoffMs(attempt) {
+  return Math.min(30000, Math.round((2 ** attempt) * 500 * (0.5 + Math.random())));
+}
+
+// Prefer the server's own guidance (Retry-After seconds, or the epoch in
+// x-ratelimit-reset) over blind backoff; fall back to exponential.
+function rateLimitDelayMs(res, attempt) {
+  const ra = Number(res.headers.get('retry-after'));
+  if (Number.isFinite(ra) && ra > 0) return Math.min(60000, ra * 1000);
+  const reset = Number(res.headers.get('x-ratelimit-reset'));
+  if (Number.isFinite(reset) && reset > 0) {
+    const wait = reset * 1000 - Date.now();
+    if (wait > 0) return Math.min(60000, wait + 1000);
+  }
+  return backoffMs(attempt);
+}
+
 function resolveToken() {
   if (process.env.BOT_TOKEN) return process.env.BOT_TOKEN;
   if (process.env.WATCH_TOKEN) return process.env.WATCH_TOKEN;
@@ -124,6 +144,7 @@ class GitHubClient {
     const url = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint}`;
     const headers = {
       Accept: 'application/vnd.github.v3+json',
+      'X-GitHub-Api-Version': '2022-11-28',
       'User-Agent': 'AuthorMark-MasterBot/1.0 (+https://github.com/Srinivasan-78/authormark-watch)',
       ...(options.headers || {}),
     };
@@ -131,18 +152,44 @@ class GitHubClient {
       headers.Authorization = `Bearer ${this.token}`;
     }
 
-    try {
-      const res = await fetch(url, { ...options, headers });
+    const maxAttempts = options.retries ?? 4;
+    let lastErr = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let res;
+      try {
+        res = await fetch(url, { ...options, headers });
+      } catch (e) {
+        // Network blip: back off and retry.
+        lastErr = new Error(`GitHub API Error: ${sanitize(e.message)}`);
+        if (attempt < maxAttempts) { await sleep(backoffMs(attempt)); continue; }
+        throw lastErr;
+      }
+
       if (res.status === 204) return null;
+
+      // Primary/secondary rate limits and transient server errors are retryable.
+      const retryable = res.status === 429 || res.status >= 500 ||
+        (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0');
+      if (retryable && attempt < maxAttempts) {
+        await sleep(rateLimitDelayMs(res, attempt));
+        continue;
+      }
+
       const data = await res.json().catch(() => null);
       if (!res.ok) {
         const msg = data && data.message ? data.message : `HTTP ${res.status}`;
-        throw new Error(`${options.method || 'GET'} ${endpoint} failed (${res.status}): ${msg}`);
+        throw new Error(`${options.method || 'GET'} ${endpoint} failed (${res.status}): ${sanitize(msg)}`);
       }
       return data;
-    } catch (e) {
-      throw new Error(`GitHub API Error: ${sanitize(e.message)}`);
     }
+
+    throw lastErr || new Error(`GitHub API Error: exhausted retries for ${endpoint}`);
+  }
+
+  // Full PR payload -- the list endpoint omits additions/deletions/changed_files.
+  async getPullRequest(owner, repo, pullNumber) {
+    return this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}`);
   }
 
   async listRepos(owner) {
@@ -263,12 +310,17 @@ const LINT_SKIP_DIRS = new Set([
 ]);
 
 const SECRET_PATTERNS = [
-  { name: 'GitHub Personal Access Token', regex: /(ghp_[A-Za-z0-9_]{36}|github_pat_[A-Za-z0-9_]{82})/ },
+  { name: 'GitHub Personal Access Token', regex: /(gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{82})/ },
   { name: 'Google / Firebase API Key', regex: /AIza[0-9A-Za-z\-_]{35}/ },
+  { name: 'Google OAuth Client Secret', regex: /GOCSPX-[A-Za-z0-9_-]{28}/ },
   { name: 'AWS Access Key ID', regex: /(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}/ },
-  { name: 'Private Key', regex: /-----BEGIN (?:RSA|OPENSSH|EC|DSA|PGP|PRIVATE) KEY-----/ },
-  { name: 'Slack Webhook / Token', regex: /https:\/\/hooks\.slack\.com\/services\/T[0-9A-Z_]+\/B[0-9A-Z_]+\/[0-9A-Za-z]+/ },
+  // Real PEM keys read "BEGIN RSA PRIVATE KEY" / "BEGIN OPENSSH PRIVATE KEY" etc.
+  { name: 'Private Key', regex: /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/ },
+  { name: 'Slack Token', regex: /xox[baprs]-[0-9A-Za-z-]{10,}/ },
+  { name: 'Slack Webhook', regex: /https:\/\/hooks\.slack\.com\/services\/T[0-9A-Z_]+\/B[0-9A-Z_]+\/[0-9A-Za-z]+/ },
   { name: 'Discord Webhook', regex: /https:\/\/discord(?:app)?\.com\/api\/webhooks\/[0-9]+\/[A-Za-z0-9_\-]+/ },
+  { name: 'Stripe Secret Key', regex: /sk_live_[0-9a-zA-Z]{24,}/ },
+  { name: 'npm Access Token', regex: /npm_[A-Za-z0-9]{36}/ },
   { name: 'Generic JWT Token', regex: /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/ },
 ];
 
@@ -324,6 +376,10 @@ function lintRepository(repoDir, repoName) {
   }
   if (!hasFile('AGENTS.md') && !hasFile('CLAUDE.md')) {
     findings.standards.push('Missing AI Agent guidance rules (`AGENTS.md` / `CLAUDE.md`)');
+  }
+  // SECURITY.md is valid at the root, in .github/, or in docs/ (GitHub reads all three).
+  if (!['SECURITY.md', '.github/SECURITY.md', 'docs/SECURITY.md'].some(hasFile)) {
+    findings.standards.push('Missing `SECURITY.md` disclosure policy');
   }
 
   // 2. Scan Individual Files
@@ -558,8 +614,16 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
 
 function classifyPullRequest(pr, files, palette) {
   const labelsToAdd = new Set();
-  const additions = pr.additions || 0;
-  const deletions = pr.deletions || 0;
+  const filesArr = Array.isArray(files) ? files : [];
+
+  // The list endpoint omits additions/deletions, so everything scored size/XS.
+  // Use the full-PR counts when present, else sum the per-file diff stats.
+  const additions = Number.isFinite(pr.additions)
+    ? pr.additions
+    : filesArr.reduce((s, f) => s + (f.additions || 0), 0);
+  const deletions = Number.isFinite(pr.deletions)
+    ? pr.deletions
+    : filesArr.reduce((s, f) => s + (f.deletions || 0), 0);
   const totalLines = additions + deletions;
 
   // 1. Size Labels
@@ -1044,8 +1108,10 @@ Environment Variables:
       try {
         const prs = await client.listPullRequests(config.owner, name, 'open');
         for (const pr of prs) {
+          // Full payload for accurate size labels; files for language labels.
+          const full = await client.getPullRequest(config.owner, name, pr.number).catch(() => pr);
           const files = await client.getPullRequestFiles(config.owner, name, pr.number).catch(() => []);
-          const classification = classifyPullRequest(pr, files, config.labelPalette);
+          const classification = classifyPullRequest(full, files, config.labelPalette);
           if (classification.toAdd.length > 0) {
             log(`    🏷️ PR #${pr.number} ("${pr.title}") -> Adding: [${classification.toAdd.join(', ')}]`);
             if (!isDryRun) {
@@ -1264,8 +1330,22 @@ function buildMarkdownReport(config, summary) {
   return lines.join('\n');
 }
 
-main().catch(err => {
-  errLog(`Master Bot execution error: ${err.stack || err.message}`);
-  process.exit(1);
-});
+// Only run the supervisor when invoked directly, so tests can import the
+// classifiers and report builder without a network round-trip.
+const isMain = (() => {
+  try { return __filename === fs.realpathSync(process.argv[1]); } catch { return false; }
+})();
+
+if (isMain) {
+  main().catch(err => {
+    errLog(`Master Bot execution error: ${err.stack || err.message}`);
+    process.exit(1);
+  });
+}
+
+export {
+  loadConfig, sanitize, GitHubClient, lintRepository, walkFiles,
+  classifyPullRequest, classifyIssue, buildMarkdownReport,
+  SECRET_PATTERNS,
+};
 

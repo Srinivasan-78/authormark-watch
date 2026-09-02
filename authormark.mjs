@@ -15,6 +15,7 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const CWD = process.cwd();
 const CONFIG_FILE = '.authormark.json';
@@ -265,6 +266,29 @@ function cmdStamp(args) {
   log(`${dry ? '[dry] ' : ''}stamped ${added}, refreshed ${refreshed}, unchanged ${same}  (${files.length} files)`);
 }
 
+// Deliberate, auditable removal -- for a licence change or upstreaming a file.
+// Never call this to "fix" a stale fingerprint; re-stamp instead.
+function cmdUnstamp(args) {
+  const cfg = fs.existsSync(path.join(CWD, CONFIG_FILE)) ? loadConfig() : { ignore: [] };
+  const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
+  const dry = !args.includes('--force');
+  const files = collect(positional(args), exts, cfg);
+  let removed = 0, clean = 0;
+  for (const rel of files) {
+    const orig = fs.readFileSync(rel, 'utf8');
+    const { header, body } = splitHeader(orig);
+    if (!header) { clean++; continue; }
+    // splitHeader already carries the zero-width mark off with the header block;
+    // just tidy the blank line it leaves at the top of the file.
+    const out = body.replace(/^\n/, '');
+    if (!dry) fs.writeFileSync(rel, out);
+    removed++;
+    log(`${dry ? 'would remove' : 'removed'} watermark: ${rel}`);
+  }
+  log(`${dry ? '[dry] ' : ''}removed ${removed}, already clean ${clean}  (${files.length} files)`);
+  if (dry && removed) log(`\nre-run with --force to write.`);
+}
+
 function cmdCheck(args) {
   const cfg = loadConfig();
   // CI has no access to the secret key, so fall back to presence-only checking
@@ -293,9 +317,20 @@ function cmdCheck(args) {
     const claimed = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
     if (claimed !== fingerprint(key, body)) tampered.push(rel);
   }
+  const ok = missing.length === 0 && tampered.length === 0;
+
+  if (args.includes('--json')) {
+    process.stdout.write(JSON.stringify({
+      ok, mode: presence ? 'presence' : 'verified',
+      total: files.length, missing, stale: tampered,
+    }, null, 2) + '\n');
+    if (!ok) process.exit(1);
+    return;
+  }
+
   for (const f of missing) console.error(`  MISSING watermark: ${f}`);
   for (const f of tampered) console.error(`  STALE fingerprint:  ${f}  (re-run: authormark stamp ${f})`);
-  if (missing.length || tampered.length) {
+  if (!ok) {
     console.error(`\nauthormark: ${missing.length} unmarked, ${tampered.length} stale of ${files.length}.`);
     process.exit(1);
   }
@@ -978,7 +1013,10 @@ const USAGE = `authormark -- layered authorship watermarking
        insert/refresh the copyright header + keyed fingerprint in source files
        --zw also plants an invisible zero-width mark that survives copy-paste
 
-  check [paths...] | check --staged
+  unstamp <paths...> [--ext ...] [--force]
+       remove the header block (licence change / upstreaming). Dry unless --force.
+
+  check [paths...] | check --staged | check --json
        exit 1 if any file is unmarked or its fingerprint is stale (for CI/hooks)
 
   seal [paths...]        write AUTHORSHIP.json: per-file hashes + keyed proof
@@ -990,20 +1028,36 @@ const USAGE = `authormark -- layered authorship watermarking
        JPEG: EXIF Artist/Copyright + XMP + COM comment (metadata only)
   hook install           git pre-commit hook that blocks de-watermarked commits`;
 
-const [cmd, ...rest] = process.argv.slice(2);
-try {
-  switch (cmd) {
-    case 'init': cmdInit(rest); break;
-    case 'setup': cmdSetup(rest); break;
-    case 'stamp': cmdStamp(rest); break;
-    case 'check': cmdCheck(rest); break;
-    case 'seal': cmdSeal(rest); break;
-    case 'verify': cmdVerify(rest); break;
-    case 'scan': cmdScan(rest); break;
-    case 'image': cmdImage(rest); break;
-    case 'hook': cmdHook(rest); break;
-    default: log(USAGE); process.exit(cmd ? 1 : 0);
+function runCli(argv) {
+  const [cmd, ...rest] = argv;
+  try {
+    switch (cmd) {
+      case 'init': cmdInit(rest); break;
+      case 'setup': cmdSetup(rest); break;
+      case 'stamp': cmdStamp(rest); break;
+      case 'unstamp': cmdUnstamp(rest); break;
+      case 'check': cmdCheck(rest); break;
+      case 'seal': cmdSeal(rest); break;
+      case 'verify': cmdVerify(rest); break;
+      case 'scan': cmdScan(rest); break;
+      case 'image': cmdImage(rest); break;
+      case 'hook': cmdHook(rest); break;
+      default: log(USAGE); process.exit(cmd ? 1 : 0);
+    }
+  } catch (e) {
+    die(e.message);
   }
-} catch (e) {
-  die(e.message);
 }
+
+// Only dispatch when run directly, so tests can import the pure helpers.
+const isMain = (() => {
+  try { return fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1]); }
+  catch { return false; }
+})();
+if (isMain) runCli(process.argv.slice(2));
+
+export {
+  canonical, fingerprint, zwEncode, zwDecode, splitHeader, insertIndex,
+  styleFor, renderHeader, headerLines, isHeaderLine, crc32, textMask,
+  lsbEmbed, lsbExtract, buildExif, collect, ignored, runCli,
+};

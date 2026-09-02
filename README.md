@@ -137,8 +137,58 @@ FIX=1 ./watch.sh
 
 ---
 
+## AuthorMark CLI (`authormark.mjs`)
+
+The watermarking engine the bot drives. Zero dependencies, Node ≥ 18.
+
+```sh
+# One command for a fresh repo: config + key + CI + agent rules + LICENSE
+# + stamp every source file + mark images + seal manifest + pre-commit hook
+node authormark.mjs setup --author "Your Name" --email you@example.com --github https://github.com/you
+
+# Insert or refresh the header + keyed fingerprint (‑‑zw adds an invisible mark)
+node authormark.mjs stamp src lib --zw
+
+# CI / hook gate: exit 1 on any unmarked file or stale fingerprint
+node authormark.mjs check .
+node authormark.mjs check --staged           # pre-commit
+node authormark.mjs check --json .            # machine-readable report
+
+# Deliberate removal (licence change, upstreaming) — dry unless --force
+node authormark.mjs unstamp path/to/file.js --force
+
+# Tamper-evident manifest of per-file hashes + keyed proof
+node authormark.mjs seal
+node authormark.mjs verify
+
+# Images: PNG text chunks + optional visible mark + hidden LSB payload;
+# JPEG EXIF/XMP/COM metadata
+node authormark.mjs image logo.png --visible "© 2026 You" --inplace
+node authormark.mjs scan logo.png            # show every mark found
+```
+
+Layers, weakest to strongest: visible header comment → keyed HMAC `Fingerprint:`
+(survives whitespace/CRLF drift) → invisible zero-width mark (survives copy-paste)
+→ image metadata + LSB steganography → sealed `AUTHORSHIP.json` manifest.
+
+---
+
 ## Architecture & Security
 
 - **Independent Checker**: `bot.mjs` runs from *this* repository and never trusts or executes foreign code inside target repositories.
 - **Zero Dependencies**: Pure Node.js standard library (`fs`, `path`, `crypto`, `child_process`, native `fetch`).
 - **Safe Push Mode**: Never pushes directly to default branches (`main`/`master`); all fixes are submitted via isolated branches and pull requests.
+
+---
+
+## Development
+
+```sh
+npm test                      # node:test unit suite (authormark + bot classifiers)
+node scripts/sync-vendor.mjs  # copy authormark.mjs -> .authormark/authormark.mjs
+node scripts/sync-vendor.mjs --check   # CI guard: fail if the two have drifted
+```
+
+`.github/workflows/ci.yml` runs the suite on Node 18/20/24, checks vendored-engine
+parity, and runs `authormark check --presence` on every push and PR.
+`.github/workflows/watch.yml` is the scheduled account-wide supervisor.

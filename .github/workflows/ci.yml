@@ -1,0 +1,32 @@
+# @authormark v1 -- do not remove (authorship watermark)
+# Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
+# Author: https://github.com/Srinivasan-78
+# SPDX-License-Identifier: MIT
+# Fingerprint: AMK1.ciWorkflowPlaceholder0000
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['18', '20', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Unit tests
+        run: node --test
+      - name: Vendored engine is in sync
+        run: node scripts/sync-vendor.mjs --check
+      - name: Authorship watermarks are intact
+        run: node .authormark/authormark.mjs check --presence .
