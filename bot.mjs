@@ -192,6 +192,39 @@ class GitHubClient {
     return this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}`);
   }
 
+  // GitHub-native security alerts. Each may 403 (feature off / token scope) --
+  // the caller treats a throw as "unknown", not "zero".
+  async countOpenAlerts(owner, repo) {
+    const result = { dependabot: 0, codeScanning: 0, secretScanning: 0, vulnerabilityAlertsDisabled: false };
+    try {
+      const d = await this.request(`/repos/${owner}/${repo}/dependabot/alerts?state=open&per_page=100`, { retries: 1 });
+      result.dependabot = Array.isArray(d) ? d.length : 0;
+    } catch {}
+    try {
+      const c = await this.request(`/repos/${owner}/${repo}/code-scanning/alerts?state=open&per_page=100`, { retries: 1 });
+      result.codeScanning = Array.isArray(c) ? c.length : 0;
+    } catch {}
+    try {
+      const s = await this.request(`/repos/${owner}/${repo}/secret-scanning/alerts?state=open&per_page=100`, { retries: 1 });
+      result.secretScanning = Array.isArray(s) ? s.length : 0;
+    } catch {}
+    try {
+      // 204 = enabled, 404 = disabled
+      await this.request(`/repos/${owner}/${repo}/vulnerability-alerts`, { retries: 1 });
+    } catch (e) {
+      if (/\(404\)/.test(e.message)) result.vulnerabilityAlertsDisabled = true;
+    }
+    return result;
+  }
+
+  // Resolve a tag/branch ref to a full commit SHA (for pinning `uses:` lines).
+  async resolveRef(owner, repo, ref) {
+    try {
+      const c = await this.request(`/repos/${owner}/${repo}/commits/${ref}`, { retries: 1 });
+      return c && c.sha ? c.sha : null;
+    } catch { return null; }
+  }
+
   async listRepos(owner) {
     const repos = [];
     let page = 1;
@@ -343,6 +376,134 @@ function walkFiles(dir, acc = []) {
   return acc;
 }
 
+// Best-effort GitHub Actions security audit -- string heuristics, no YAML parser.
+// Returns an array of human-readable risk strings for one workflow file.
+function auditWorkflow(text, file) {
+  const risks = [];
+  const lines = text.split('\n');
+  const has = re => re.test(text);
+
+  // 1. pull_request_target + a checkout of attacker-controlled PR code
+  if (has(/^\s*pull_request_target\s*:/m) &&
+      has(/uses:\s*actions\/checkout/) &&
+      has(/ref:\s*\$\{\{\s*github\.event\.pull_request\.head/)) {
+    risks.push(`\`${file}\`: \`pull_request_target\` checks out PR head code — runs untrusted code with a write token`);
+  }
+
+  // 2. Unpinned actions (tag/branch instead of a full commit SHA)
+  const unpinned = new Set();
+  for (const m of text.matchAll(/uses:\s*([^\s#'"]+)@([^\s#'"]+)/g)) {
+    const [, action, ref] = m;
+    if (action.startsWith('./') || action.startsWith('docker://')) continue;
+    if (/^[0-9a-f]{40}$/.test(ref)) continue;
+    unpinned.add(`${action}@${ref}`);
+  }
+  if (unpinned.size) risks.push(`\`${file}\`: ${unpinned.size} action(s) pinned to a tag, not a SHA: ${[...unpinned].slice(0, 6).join(', ')}`);
+
+  // 3. Token scope
+  if (has(/permissions:\s*write-all/)) risks.push(`\`${file}\`: \`permissions: write-all\` — grant least privilege instead`);
+  else if (!has(/^\s*permissions\s*:/m)) risks.push(`\`${file}\`: no top-level \`permissions:\` — the job gets the default broad \`GITHUB_TOKEN\``);
+
+  // 4. Script injection: untrusted event data interpolated into a shell step
+  const risky = /\$\{\{\s*github\.event\.(?:issue\.title|issue\.body|pull_request\.title|pull_request\.body|pull_request\.head\.ref|pull_request\.head\.label|comment\.body|review\.body|head_commit\.message|pages|commits)/;
+  let inRun = false;
+  for (const l of lines) {
+    if (/^\s*(-\s*)?run:\s*[|>]?/.test(l)) inRun = true;
+    else if (inRun && /^\s*\S/.test(l) && !/^\s+/.test(l.replace(/^\s*-\s*/, ''))) inRun = false;
+    if (inRun && risky.test(l)) {
+      risks.push(`\`${file}\`: untrusted \`\${{ github.event.* }}\` used in a \`run:\` step — inject via an env: var instead`);
+      break;
+    }
+  }
+
+  // 5. curl | sh
+  if (has(/(curl|wget)\s+[^\n|]*\|\s*(sudo\s+)?(ba)?sh\b/)) {
+    risks.push(`\`${file}\`: pipes a network download straight into a shell`);
+  }
+
+  return risks;
+}
+
+// Rewrite `uses: owner/repo@tag` -> `uses: owner/repo@<sha>  # tag`, using a
+// pre-resolved Map of "owner/repo@ref" -> sha. Pure; returns { text, changes }.
+function pinWorkflowActions(text, shaMap) {
+  const changes = [];
+  const out = text.replace(/(\buses:\s*)([^\s#'"]+)@([^\s#'"]+)([^\n]*)/g, (m, pre, action, ref, rest) => {
+    if (/^[0-9a-f]{40}$/.test(ref) || action.startsWith('./') || action.startsWith('docker://')) return m;
+    const sha = shaMap.get(`${action}@${ref}`);
+    if (!sha) return m;
+    changes.push(`${action}@${ref} -> ${sha.slice(0, 12)}`);
+    const trailing = /#/.test(rest) ? rest.replace(/#.*/, `# ${ref}`) : `${rest}  # ${ref}`;
+    return `${pre}${action}@${sha}${trailing}`;
+  });
+  return { text: out, changes };
+}
+
+// Resolve every unpinned action ref in .github/workflows/* and rewrite the files.
+async function pinActionsOnDisk(repoDir, client) {
+  const dir = path.join(repoDir, '.github', 'workflows');
+  if (!fs.existsSync(dir)) return 0;
+  const wanted = new Set();
+  const texts = {};
+  for (const f of fs.readdirSync(dir)) {
+    if (!/\.ya?ml$/.test(f)) continue;
+    const t = fs.readFileSync(path.join(dir, f), 'utf8');
+    texts[f] = t;
+    for (const m of t.matchAll(/uses:\s*([^\s#'"]+)@([^\s#'"]+)/g)) {
+      const [, action, ref] = m;
+      if (/^[0-9a-f]{40}$/.test(ref) || action.startsWith('./') || action.startsWith('docker://')) continue;
+      if (action.split('/').length < 2) continue;
+      wanted.add(`${action}@${ref}`);
+    }
+  }
+  const shaMap = new Map();
+  for (const key of wanted) {
+    const at = key.lastIndexOf('@');
+    const action = key.slice(0, at), ref = key.slice(at + 1);
+    const [o, r] = action.split('/');
+    const sha = await client.resolveRef(o, r, ref);
+    if (sha) shaMap.set(key, sha);
+  }
+  let total = 0;
+  for (const [f, t] of Object.entries(texts)) {
+    const { text: next, changes } = pinWorkflowActions(t, shaMap);
+    if (changes.length) { fs.writeFileSync(path.join(dir, f), next); total += changes.length; }
+  }
+  return total;
+}
+
+const HISTORY_SECRET_RE = 'ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}|AKIA[A-Z0-9]{16}|AIza[0-9A-Za-z_\\-]{35}|xox[baprs]-[0-9A-Za-z-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|sk_live_[0-9a-zA-Z]{24}';
+
+// Look for secrets that were committed and later removed -- still recoverable
+// from history. Prefilter with `git log -G` so we only `show` candidate commits.
+function scanGitHistory(repoDir) {
+  const out = [];
+  try {
+    const shas = execSync(
+      `git log --all --no-merges -n 400 --format=%H -G"${HISTORY_SECRET_RE}"`,
+      { cwd: repoDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).split('\n').filter(Boolean).slice(0, 15);
+    const re = new RegExp(HISTORY_SECRET_RE);
+    for (const sha of shas) {
+      let diff = '';
+      try {
+        diff = execSync(`git show --no-color --format= ${sha}`, { cwd: repoDir, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+      } catch { continue; }
+      let file = '';
+      for (const l of diff.split('\n')) {
+        const fm = l.match(/^\+\+\+ b\/(.+)/);
+        if (fm) { file = fm[1]; continue; }
+        if (l.startsWith('+') && !l.startsWith('+++') && re.test(l) && !/\.(md|test|spec|example|sample)\b/.test(file)) {
+          out.push(`Secret-shaped string in \`${file}\` at commit \`${sha.slice(0, 10)}\` (still in history)`);
+          break;
+        }
+      }
+      if (out.length >= 10) break;
+    }
+  } catch {}
+  return out;
+}
+
 function lintRepository(repoDir, repoName) {
   const findings = {
     secrets: [],
@@ -350,10 +511,26 @@ function lintRepository(repoDir, repoName) {
     unwantedArtifacts: [],
     standards: [],
     whitespaceIssues: [],
+    workflowRisks: [],
+    historySecrets: [],
   };
 
   const files = walkFiles(repoDir);
   const rel = f => path.relative(repoDir, f).replace(/\\/g, '/');
+
+  // 0. GitHub Actions workflow security audit + secrets in git history
+  const wfDir = path.join(repoDir, '.github', 'workflows');
+  if (fs.existsSync(wfDir)) {
+    for (const wf of fs.readdirSync(wfDir)) {
+      if (!/\.ya?ml$/.test(wf)) continue;
+      try {
+        for (const risk of auditWorkflow(fs.readFileSync(path.join(wfDir, wf), 'utf8'), `.github/workflows/${wf}`)) {
+          findings.workflowRisks.push(risk);
+        }
+      } catch {}
+    }
+  }
+  for (const h of scanGitHistory(repoDir)) findings.historySecrets.push(h);
 
   // 1. Repo Health Standards
   const hasFile = name => fs.existsSync(path.join(repoDir, name));
@@ -962,6 +1139,7 @@ Environment Variables:
     authormark: { clean: [], drifted: [], unmarked: [], fixed: [], fixFailed: [] },
     lintFindings: [],
     lintFixed: [],
+    securityAlerts: [],
     prsTagged: [],
     issuesTagged: [],
     failedRepos: [],
@@ -1055,14 +1233,26 @@ Environment Variables:
         lintRes.syntaxErrors.length +
         lintRes.unwantedArtifacts.length +
         lintRes.standards.length +
-        lintRes.whitespaceIssues.length;
+        lintRes.whitespaceIssues.length +
+        lintRes.workflowRisks.length +
+        lintRes.historySecrets.length;
 
       if (issueCount > 0) {
         log(`    ⚠️ Found ${issueCount} hygiene / lint findings.`);
         summary.lintFindings.push({ name, ...lintRes });
 
-        const hasFixable = lintRes.unwantedArtifacts.length > 0 || lintRes.standards.length > 0 || lintRes.whitespaceIssues.length > 0;
         const lintAutoFix = isFix || config.features?.lint?.autoFix === true;
+
+        // Pin unpinned GitHub Actions to a commit SHA (writes files to disk;
+        // fixLintRepository's `git add -A` picks them up).
+        let pinnedCount = 0;
+        if (lintAutoFix && !isDryRun && token && lintRes.workflowRisks.some(r => /pinned to a tag/.test(r))) {
+          pinnedCount = await pinActionsOnDisk(repoDir, client);
+          if (pinnedCount) log(`    📌 Pinned ${pinnedCount} action reference(s) to a SHA`);
+        }
+
+        const hasFixable = lintRes.unwantedArtifacts.length > 0 || lintRes.standards.length > 0 ||
+          lintRes.whitespaceIssues.length > 0 || pinnedCount > 0;
 
         if (hasFixable && lintAutoFix && !isDryRun) {
           log(`    🔧 Attempting automated repository hygiene & standards fix...`);
@@ -1099,6 +1289,19 @@ Environment Variables:
         }
       } else {
         log(`    ✅ Code lint & repository hygiene clean.`);
+      }
+    }
+
+    // B2. GitHub-native security alerts
+    if (doLint && token) {
+      try {
+        const a = await client.countOpenAlerts(config.owner, name);
+        if (a.dependabot || a.codeScanning || a.secretScanning || a.vulnerabilityAlertsDisabled) {
+          log(`    🛡️ Security alerts: ${a.dependabot} Dependabot / ${a.codeScanning} code-scanning / ${a.secretScanning} secret-scanning`);
+          summary.securityAlerts.push({ name, ...a });
+        }
+      } catch (e) {
+        warn(`Could not read security alerts for ${name}: ${e.message}`);
       }
     }
 
@@ -1188,6 +1391,7 @@ Environment Variables:
         summary.authormark.drifted.length > 0 ||
         summary.authormark.unmarked.length > 0 ||
         summary.lintFindings.length > 0 ||
+        summary.securityAlerts.length > 0 ||
         summary.failedRepos.length > 0;
 
       if (existing) {
@@ -1220,7 +1424,8 @@ Environment Variables:
 function buildMarkdownReport(config, summary) {
   const lines = [];
   const am = summary.authormark;
-  const problemsCount = am.drifted.length + am.unmarked.length + summary.lintFindings.length + summary.failedRepos.length;
+  const problemsCount = am.drifted.length + am.unmarked.length + summary.lintFindings.length +
+    (summary.securityAlerts ? summary.securityAlerts.length : 0) + summary.failedRepos.length;
 
   lines.push(`# Master Bot Account Dashboard (@${config.owner})`);
   lines.push(`\nScanned **${summary.total}** monitored repositories on \`${summary.scannedTime}\`.\n`);
@@ -1289,8 +1494,30 @@ function buildMarkdownReport(config, summary) {
         lines.push(`- ⚪ **Health & Standard Guidelines**:`);
         for (const s of item.standards) lines.push(`  - ${s}`);
       }
+      if (item.workflowRisks && item.workflowRisks.length > 0) {
+        lines.push(`- 🟣 **GitHub Actions Security**:`);
+        for (const s of item.workflowRisks) lines.push(`  - ${s}`);
+      }
+      if (item.historySecrets && item.historySecrets.length > 0) {
+        lines.push(`- 🔴 **Secrets in Git History**:`);
+        for (const s of item.historySecrets) lines.push(`  - ${s}`);
+      }
       lines.push('');
     }
+  }
+
+  // GitHub-native security alerts (Dependabot / code scanning / secret scanning)
+  if (summary.securityAlerts && summary.securityAlerts.length > 0) {
+    lines.push(`## 🛡️ GitHub Security Alerts`);
+    for (const a of summary.securityAlerts) {
+      const bits = [];
+      if (a.dependabot) bits.push(`${a.dependabot} Dependabot`);
+      if (a.codeScanning) bits.push(`${a.codeScanning} code-scanning`);
+      if (a.secretScanning) bits.push(`${a.secretScanning} secret-scanning`);
+      if (a.vulnerabilityAlertsDisabled) bits.push('Dependabot alerts disabled');
+      if (bits.length) lines.push(`- \`${a.name}\`: ${bits.join(', ')}`);
+    }
+    lines.push('');
   }
 
   // PR Tagging Summary
@@ -1346,6 +1573,7 @@ if (isMain) {
 export {
   loadConfig, sanitize, GitHubClient, lintRepository, walkFiles,
   classifyPullRequest, classifyIssue, buildMarkdownReport,
+  auditWorkflow, scanGitHistory, pinWorkflowActions,
   SECRET_PATTERNS,
 };
 
