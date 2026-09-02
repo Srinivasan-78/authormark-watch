@@ -4,7 +4,7 @@
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.IyQohlZxtoLO9n-7TKpN3I
+ * Fingerprint: AMK1.jKWnImaepZCJWQ-uHtTXwZ
  */
 
 /**
@@ -1072,13 +1072,16 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
       stdio: 'ignore',
     });
 
-    // Push branch
-    if (token) {
-      const pushUrl = `https://x-access-token:${token}@github.com/${owner}/${repoName}.git`;
-      execSync(`git push -u "${pushUrl}" "${branch}" --force-with-lease`, { cwd: repoDir, stdio: 'ignore' });
-    } else {
-      execSync(`git push -u origin "${branch}" --force-with-lease`, { cwd: repoDir, stdio: 'ignore' });
-    }
+    // Push branch. Plain --force, not --force-with-lease: the shallow clone has
+    // no remote-tracking ref for `branch`, so --force-with-lease has no lease
+    // and rejects ("stale info") whenever a lingering older `${branch}` has
+    // diverged from the default branch -- which is every re-run. This branch is
+    // wholly bot-owned and regenerated from scratch each time (and watch.yml
+    // serialises runs via a concurrency group), so there is nothing to clobber.
+    const pushRemote = token
+      ? `https://x-access-token:${token}@github.com/${owner}/${repoName}.git`
+      : 'origin';
+    execSync(`git push -u "${pushRemote}" "${branch}" --force`, { cwd: repoDir, stdio: 'ignore' });
 
     return { success: true, branch, changes: changesMade, message: `Pushed hygiene fixes to ${branch}` };
   } catch (err) {
@@ -1306,13 +1309,14 @@ function fixAuthorMark(repoDir, repoName, config, token) {
       stdio: 'ignore',
     });
 
-    // 4. Push branch
-    if (token) {
-      const pushUrl = `https://x-access-token:${token}@github.com/${owner}/${repoName}.git`;
-      execSync(`git push -u "${pushUrl}" "${branch}" --force-with-lease`, { cwd: repoDir, stdio: 'ignore' });
-    } else {
-      execSync(`git push -u origin "${branch}" --force-with-lease`, { cwd: repoDir, stdio: 'ignore' });
-    }
+    // 4. Push branch. Plain --force (see fixLintRepository): the shallow clone
+    // carries no remote-tracking ref, so --force-with-lease rejects a diverged
+    // stale `${branch}` with "stale info". The branch is bot-owned and rebuilt
+    // each run.
+    const pushRemote = token
+      ? `https://x-access-token:${token}@github.com/${owner}/${repoName}.git`
+      : 'origin';
+    execSync(`git push -u "${pushRemote}" "${branch}" --force`, { cwd: repoDir, stdio: 'ignore' });
 
     return { success: true, branch, message: `Pushed updates to ${branch}` };
   } catch (err) {
@@ -1443,6 +1447,7 @@ or tune features.{authormark,lint}.autoFix for itself.
     authormark: { clean: [], drifted: [], unmarked: [], fixed: [], fixFailed: [] },
     lintFindings: [],
     lintFixed: [],
+    lintFixFailed: [],
     awaitingMerge: [],
     securityAlerts: [],
     prsTagged: [],
@@ -1597,6 +1602,13 @@ or tune features.{authormark,lint}.autoFix for itself.
             } else if (fixPrUrl) {
               summary.lintFixed.push({ name, prUrl: fixPrUrl, action: 'Included in PR', changes: lintFixResult.changes });
             }
+          } else if (!lintFixResult.success) {
+            // Previously swallowed -- a repo could show "Health & Standard
+            // Guidelines" findings forever with no PR and no explanation.
+            errLog(`    ❌ Hygiene fix failed: ${lintFixResult.error || 'unknown error'}`);
+            summary.lintFixFailed.push({ name, reason: lintFixResult.error || 'unknown error' });
+          } else {
+            log(`    ℹ️ Hygiene scan flagged issues but nothing was auto-fixable.`);
           }
         }
       } else {
@@ -1697,6 +1709,7 @@ or tune features.{authormark,lint}.autoFix for itself.
     summary.authormark.unmarked.length > 0 ||
     summary.lintFindings.length > 0 ||
     summary.awaitingMerge.length > 0 ||
+    (summary.lintFixFailed && summary.lintFixFailed.length > 0) ||
     summary.securityAlerts.length > 0 ||
     summary.failedRepos.length > 0;
 
@@ -1747,8 +1760,9 @@ function buildMarkdownReport(config, summary) {
   const lines = [];
   const am = summary.authormark;
   const awaitingMerge = summary.awaitingMerge || [];
+  const lintFixFailed = summary.lintFixFailed || [];
   const problemsCount = am.drifted.length + am.unmarked.length + summary.lintFindings.length +
-    awaitingMerge.length +
+    awaitingMerge.length + lintFixFailed.length +
     (summary.securityAlerts ? summary.securityAlerts.length : 0) + summary.failedRepos.length;
 
   lines.push(`# Master Bot Account Dashboard (@${config.owner})`);
@@ -1758,6 +1772,15 @@ function buildMarkdownReport(config, summary) {
     lines.push(`> 🟢 **All Systems Nominal**: Every monitored repository is watermarked, code-linted, and up to date.\n`);
   } else {
     lines.push(`> ⚠️ **Attention Needed**: Found items requiring review across **${problemsCount}** checks.\n`);
+  }
+
+  // Hygiene fixes that errored out (git push rejects, stamp failures, ...).
+  // Without this section such repos silently show findings but never a PR.
+  if (lintFixFailed.length > 0) {
+    lines.push(`## ❌ Hygiene Fix Failed`);
+    lines.push(`The automated hygiene fix threw for these repos, so no PR was opened. They will be retried next run.\n`);
+    for (const r of lintFixFailed) lines.push(`- \`${r.name}\`: ${r.reason}`);
+    lines.push('');
   }
 
   // Awaiting-merge Section -- fix PRs that exist but have NOT landed yet. These
