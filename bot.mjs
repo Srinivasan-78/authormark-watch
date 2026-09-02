@@ -4,7 +4,7 @@
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.MasterBotCentralEngine78
+ * Fingerprint: AMK1.vvRVvzIOdtiQ2fe7lHu8CD
  */
 
 /**
@@ -746,6 +746,10 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
   const year = new Date().getFullYear();
 
   const changesMade = [];
+  // Files this run scaffolds from scratch. They are written without an
+  // `@authormark` header, so any repo that runs `authormark check` as a merge
+  // gate would reject them -- stamp them before committing (see step 5c).
+  const createdFiles = [];
 
   try {
     // 0. Ensure branch is checked out
@@ -753,6 +757,15 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
       execSync('git fetch --unshallow origin', { cwd: repoDir, stdio: 'ignore' });
     } catch {}
     execSync(`git checkout -B "${branch}"`, { cwd: repoDir, stdio: 'ignore' });
+
+    // 0b. Materialise the signing key from the environment if CI provided it,
+    // so the stamp pass in step 5c writes a real keyed fingerprint.
+    const keyPath = path.join(os.homedir(), '.authormark.key');
+    if (!fs.existsSync(keyPath) && process.env.AUTHORMARK_KEY) {
+      try {
+        fs.writeFileSync(keyPath, process.env.AUTHORMARK_KEY.trim() + '\n', { mode: 0o600 });
+      } catch {}
+    }
 
     // 1. Remove unwanted tracked files (bytecode, OS files)
     let tracked = [];
@@ -803,6 +816,7 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
     if (!fs.existsSync(path.join(repoDir, 'README.md')) && !fs.existsSync(path.join(repoDir, 'readme.md'))) {
       const readme = `# ${repoName}\n\nRepository maintained by [@${owner}](https://github.com/${owner}).\n`;
       fs.writeFileSync(path.join(repoDir, 'README.md'), readme);
+      createdFiles.push('README.md');
       changesMade.push('Created initial `README.md`');
     }
 
@@ -812,6 +826,7 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
       const claude = `# Repo rules\n\n@AGENTS.md\n`;
       fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), agents);
       fs.writeFileSync(path.join(repoDir, 'CLAUDE.md'), claude);
+      createdFiles.push('AGENTS.md', 'CLAUDE.md');
       changesMade.push('Created `AGENTS.md` and `CLAUDE.md` rules');
     }
 
@@ -823,6 +838,7 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
         `# Security Policy\n\n## Reporting a Vulnerability\n\nPlease report security issues privately to ` +
         `[@${owner}](https://github.com/${owner}) via a GitHub Security Advisory or email. ` +
         `Do not open a public issue for undisclosed vulnerabilities.\n\nWe aim to acknowledge reports within 72 hours.\n`);
+      createdFiles.push('.github/SECURITY.md');
       changesMade.push('Created `.github/SECURITY.md`');
     }
     if (!['CONTRIBUTING.md', '.github/CONTRIBUTING.md', 'docs/CONTRIBUTING.md'].some(f => fs.existsSync(path.join(repoDir, f)))) {
@@ -831,6 +847,7 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
         `# Contributing\n\nThanks for helping out.\n\n1. Fork and branch from \`main\`.\n2. Keep changes focused; add or update tests.\n` +
         `3. Do not remove \`@authormark\` headers — refresh a stale fingerprint with \`authormark stamp <file>\`.\n` +
         `4. Open a pull request describing the change and its motivation.\n`);
+      createdFiles.push('.github/CONTRIBUTING.md');
       changesMade.push('Created `.github/CONTRIBUTING.md`');
     }
     if (!fs.existsSync(path.join(ghDir, 'dependabot.yml')) && !fs.existsSync(path.join(ghDir, 'dependabot.yaml'))) {
@@ -844,7 +861,25 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
       fs.writeFileSync(path.join(ghDir, 'dependabot.yml'),
         `version: 2\nupdates:\n` +
         ecos.map(e => `  - package-ecosystem: "${e}"\n    directory: "/"\n    schedule:\n      interval: "weekly"\n`).join(''));
+      createdFiles.push('.github/dependabot.yml');
       changesMade.push('Created `.github/dependabot.yml`');
+    }
+
+    // 5c. Watermark every file we just scaffolded. Skipped when the repo does
+    // not use AuthorMark (no `.authormark.json`), where a header would be noise
+    // and no `authormark check` gate exists to satisfy.
+    if (createdFiles.length && fs.existsSync(path.join(repoDir, '.authormark.json'))) {
+      const stamped = createdFiles.filter(f => fs.existsSync(path.join(repoDir, f)));
+      if (stamped.length) {
+        try {
+          execFileSync(process.execPath, [AM_SCRIPT, 'stamp', ...stamped], {
+            cwd: repoDir,
+            stdio: 'ignore',
+          });
+        } catch (err) {
+          changesMade.push(`WARNING: could not stamp scaffolded files (${sanitize(err.message)})`);
+        }
+      }
     }
 
     // 6. Fix Trailing Whitespace in code/text files
