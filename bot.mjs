@@ -4,7 +4,7 @@
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.jKWnImaepZCJWQ-uHtTXwZ
+ * Fingerprint: AMK1.tS1k7BidjlRfFEQhw08AOT
  */
 
 /**
@@ -831,9 +831,11 @@ out/
 .env.production.local
 `;
 
-// Grouped Dependabot config: one PR per ecosystem for all minor/patch bumps,
-// so five lockfile-touching PRs don't pile up and conflict with each other.
-// Majors still arrive as individual PRs -- they need a human look.
+// Grouped Dependabot config: a single catch-all group per ecosystem, so every
+// bump -- major, minor and patch alike -- lands in one PR instead of Dependabot
+// opening a separate lockfile-touching PR per dependency that then conflict with
+// each other. `patterns: ["*"]` with no `update-types` filter sweeps in majors
+// too; review the one combined PR rather than a dozen.
 function buildDependabotConfig(ecosystems) {
   const ecos = ecosystems && ecosystems.length ? ecosystems : ['github-actions'];
   return `version: 2\nupdates:\n` + ecos.map(e =>
@@ -842,8 +844,9 @@ function buildDependabotConfig(ecosystems) {
     `    schedule:\n      interval: "weekly"\n` +
     `    open-pull-requests-limit: 10\n` +
     `    groups:\n` +
-    `      ${e}-minor-patch:\n` +
-    `        update-types: ["minor", "patch"]\n`
+    `      ${e}-all:\n` +
+    `        patterns: ["*"]\n` +
+    `        update-types: ["major", "minor", "patch"]\n`
   ).join('');
 }
 
