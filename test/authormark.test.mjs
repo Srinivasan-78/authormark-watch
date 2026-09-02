@@ -15,6 +15,7 @@ import {
   canonical, fingerprint, zwEncode, zwDecode, splitHeader, insertIndex,
   styleFor, renderHeader, headerLines, isHeaderLine, crc32,
   matchGlob, includedBy, ignored,
+  gifMark, svgMark, mp3Mark, webpMark, mp4Mark, pdfMark,
 } from '../authormark.mjs';
 
 const KEY = Buffer.alloc(32, 7);
@@ -158,4 +159,87 @@ test('headerLines omits the SPDX line when no licence is configured', () => {
 
 test('crc32 matches the known check value for "123456789"', () => {
   assert.equal(crc32(Buffer.from('123456789')) >>> 0, 0xcbf43926);
+});
+
+// ---------------------------------------------------------------- media carriers
+
+const MCFG = { year: 2026, author: 'Ann Auth', email: 'a@x.co', github: 'https://github.com/ann' };
+const SENT = '@authormark v1 -- do not remove';
+
+test('gifMark inserts one comment extension and is idempotent', () => {
+  const gif = Buffer.from(
+    '47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b', 'hex');
+  const once = gifMark(gif, `${SENT}. (c) 2026 Ann`);
+  assert.ok(once.length > gif.length);
+  assert.ok(once.toString('latin1').includes(SENT));
+  assert.equal(once.toString('latin1').split('@authormark v1').length - 1, 1);
+  const twice = gifMark(once, `${SENT}. again`);
+  assert.equal(twice.toString('latin1').split('@authormark v1').length - 1, 1);
+});
+
+test('svgMark adds a single <metadata id="authormark"> and replaces its own', () => {
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>');
+  const a = svgMark(svg, MCFG, `${SENT}. rights`);
+  assert.match(a.toString(), /<metadata id="authormark">/);
+  assert.match(a.toString(), /<dc:creator>Ann Auth<\/dc:creator>/);
+  const b = svgMark(a, MCFG, `${SENT}. rights v2`);
+  assert.equal(b.toString().split('<metadata').length - 1, 1);
+});
+
+test('svgMark leaves an author-owned <metadata> element intact', () => {
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><metadata>keep me</metadata><rect/></svg>');
+  const out = svgMark(svg, MCFG, 'r').toString();
+  assert.ok(out.includes('<metadata>keep me</metadata>'));
+  assert.ok(out.includes('<metadata id="authormark">'));
+});
+
+test('mp3Mark prepends an ID3v2.4 tag and preserves the audio bytes', () => {
+  const audio = Buffer.from('fffb90c400112233445566778899aabb', 'hex');
+  const out = mp3Mark(audio, MCFG, 'rights');
+  assert.equal(out.toString('latin1', 0, 3), 'ID3');
+  assert.equal(out[3], 0x04);
+  assert.ok(out.subarray(-audio.length).equals(audio));
+  // re-marking replaces the tag, does not stack it
+  const out2 = mp3Mark(out, MCFG, 'rights2');
+  assert.ok(out2.subarray(-audio.length).equals(audio));
+  assert.equal(out2.toString('latin1').indexOf('ID3'), 0);
+});
+
+test('webpMark keeps the RIFF size field correct and adds an XMP chunk', () => {
+  const webp = Buffer.concat([
+    Buffer.from('RIFF'), Buffer.from([0, 0, 0, 0]), Buffer.from('WEBP'),
+    Buffer.from('VP8 '), Buffer.from([4, 0, 0, 0]), Buffer.from([1, 2, 3, 4]),
+  ]);
+  const out = webpMark(webp, MCFG, 'rights');
+  assert.equal(out.readUInt32LE(4), out.length - 8);
+  assert.ok(out.toString('latin1').includes('XMP '));
+  assert.ok(out.toString('latin1').includes('github.com/ann'));
+});
+
+test('mp4Mark nests a udta box under moov and fixes the moov size', () => {
+  const inner = Buffer.from('deadbeef', 'hex');
+  const moov = Buffer.concat([
+    (() => { const b = Buffer.alloc(8); b.writeUInt32BE(8 + inner.length); b.write('moov', 4); return b; })(),
+    inner,
+  ]);
+  const mp4 = Buffer.concat([Buffer.from('000000106674797069736f6d00000000', 'hex'), moov]);
+  const out = mp4Mark(mp4, MCFG);
+  assert.ok(out.length > mp4.length);
+  assert.ok(out.toString('latin1').includes('udta'));
+  assert.ok(out.toString('latin1').includes('\xa9cpy'));
+  // moov size field must equal the actual new moov box length
+  const newMoovLen = out.readUInt32BE(mp4.indexOf(Buffer.from('moov')) - 4);
+  assert.equal(newMoovLen, mp4.length - (mp4.indexOf(Buffer.from('moov')) - 4) + (out.length - mp4.length));
+});
+
+test('pdfMark appends an incremental update with XMP metadata and /Prev', () => {
+  const pdf = Buffer.from(
+    '%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n' +
+    'xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n' +
+    'trailer<</Size 2/Root 1 0 R>>\nstartxref\n50\n%%EOF\n');
+  const out = pdfMark(pdf, MCFG, 'rights').toString('latin1');
+  assert.ok(out.startsWith('%PDF-'));
+  assert.ok(out.slice(pdf.length).includes('/Type /Metadata'));
+  assert.ok(out.includes('/Prev 50'));
+  assert.ok(out.trimEnd().endsWith('%%EOF'));
 });

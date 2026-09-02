@@ -171,6 +171,13 @@ Layers, weakest to strongest: visible header comment → keyed HMAC `Fingerprint
 (survives whitespace/CRLF drift) → invisible zero-width mark (survives copy-paste)
 → image metadata + LSB steganography → sealed `AUTHORSHIP.json` manifest.
 
+`image` also writes metadata-level marks for **GIF** (comment extension), **SVG**
+(`<metadata>` Dublin Core), **WebP** (`XMP ` chunk), **MP3** (ID3v2.4), **MP4/MOV**
+(`moov/udta` ©-atoms) and **PDF** (incremental-update `/Info` + XMP). These are
+metadata only — a re-encode can strip them. `authormark attack <image>` runs a
+battery of ImageMagick transforms and reports which marks survive which
+(re-encode, resize, crop, rotate, grayscale, `-strip`).
+
 Recognises ~90 source extensions across C-family, hash, `--`, `(* *)`, `//`, `;`
 and `%` comment syntaxes, plus named files (`Dockerfile`, `Rakefile`, …).
 `.v` and `.m` are excluded as ambiguous — add them via config `ext` if needed.

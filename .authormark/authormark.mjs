@@ -784,6 +784,12 @@ function cmdScan(args) {
     const ext = path.extname(f).toLowerCase();
     if (ext === '.png') { scanPng(buf, keys[0] || null); continue; }
     if (ext === '.jpg' || ext === '.jpeg') { scanJpeg(buf); continue; }
+    if (MEDIA_EXTS.has(ext)) {
+      const raw = buf.toString('latin1');
+      const hit = ext === '.svg' ? /<metadata[^>]*id="authormark"/.test(raw) : raw.includes(SENTINEL);
+      log(`  ${ext.slice(1).toUpperCase()} metadata mark: ${hit ? 'present' : 'not found'}`);
+      continue;
+    }
     const text = buf.toString('utf8');
     const { header, body } = splitHeader(text);
     if (header) {
@@ -1140,7 +1146,8 @@ function cmdImage(args) {
       log(`${f} -> ${out}  [EXIF Artist/Copyright + XMP + COM]  (no pixel marks: JPEG is lossy -- convert to PNG for those)`);
       continue;
     }
-    if (ext !== '.png') { warn(`skip ${f} (only .png and .jpg supported)`); continue; }
+    if (MEDIA_EXTS.has(ext)) { markMedia(f, out, cfg); continue; }
+    if (ext !== '.png') { warn(`skip ${f} (unsupported: ${ext || 'no extension'})`); continue; }
 
     const img = decodePng(fs.readFileSync(f));
     const { width: W, height: H, rgba } = img;
@@ -1175,6 +1182,253 @@ function cmdImage(args) {
     fs.writeFileSync(out, encodePng({ width: W, height: H, rgba, hasAlpha: img.hasAlpha, texts }));
     log(`${f} -> ${out}  [${W}x${H}] metadata${visible ? ' + visible' : ''}${noStego ? '' : ` + hidden x${copies}`}`);
   }
+}
+
+// ---------------------------------------------------------------- other media carriers
+// Metadata-level marks only (no pixel/DCT stego). Enough to assert authorship
+// and survive a plain copy; a re-encode by an editor can still strip them --
+// `authormark attack` shows exactly what survives what.
+
+const MEDIA_EXTS = new Set(['.gif', '.svg', '.mp3', '.webp', '.mp4', '.m4v', '.m4a', '.mov', '.pdf']);
+
+function markMedia(f, out, cfg) {
+  const ext = path.extname(f).toLowerCase();
+  const buf = fs.readFileSync(f);
+  const rights = `${SENTINEL} ${NOREMOVE}. Copyright (c) ${cfg.year} ${cfg.author}. ${cfg.github}`;
+  let marked;
+  if (ext === '.gif') marked = gifMark(buf, rights);
+  else if (ext === '.svg') marked = svgMark(buf, cfg, rights);
+  else if (ext === '.mp3') marked = mp3Mark(buf, cfg, rights);
+  else if (ext === '.webp') marked = webpMark(buf, cfg, rights);
+  else if (['.mp4', '.m4v', '.m4a', '.mov'].includes(ext)) marked = mp4Mark(buf, cfg);
+  else if (ext === '.pdf') marked = pdfMark(buf, cfg, rights);
+  else return false;
+  fs.writeFileSync(out, marked);
+  log(`${f} -> ${out}  [${ext.slice(1).toUpperCase()} metadata mark]`);
+  return true;
+}
+
+// GIF89a: a Comment Extension (0x21 0xFE ... 0x00) right after the header +
+// Logical Screen Descriptor + optional Global Color Table.
+function gifMark(buf, text) {
+  if (buf.toString('ascii', 0, 3) !== 'GIF') die('not a GIF');
+  let p = 13;
+  const packed = buf[10];
+  if (packed & 0x80) p += 3 * (2 ** ((packed & 7) + 1));   // skip GCT
+  const clean = [];
+  // Drop any comment extension we previously wrote, keep everything else.
+  let q = p;
+  while (q < buf.length && buf[q] === 0x21 && buf[q + 1] === 0xFE) {
+    let r = q + 2;
+    while (buf[r] && r < buf.length) r += 1 + buf[r];
+    r++;
+    if (buf.toString('latin1', q + 3, q + 3 + SENTINEL.length) !== SENTINEL) { clean.push(buf.subarray(q, r)); }
+    q = r;
+  }
+  const body = Buffer.from(text, 'latin1');
+  const subs = [];
+  for (let i = 0; i < body.length; i += 255) {
+    const chunk = body.subarray(i, i + 255);
+    subs.push(Buffer.from([chunk.length]), chunk);
+  }
+  const ext = Buffer.concat([Buffer.from([0x21, 0xFE]), ...subs, Buffer.from([0x00])]);
+  return Buffer.concat([buf.subarray(0, p), ext, ...clean, buf.subarray(q)]);
+}
+
+// SVG: a real <metadata> element with Dublin Core, just inside <svg …>.
+function svgMark(buf, cfg, rights) {
+  // Only ever replace our own <metadata id="authormark">; leave the author's alone.
+  let s = buf.toString('utf8').replace(/\s*<metadata\b[^>]*\bid="authormark"[\s\S]*?<\/metadata>\s*/i, '');
+  const md = `<metadata id="authormark">` +
+    `<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/">` +
+    `<rdf:Description><dc:creator>${esc(cfg.author)}</dc:creator>` +
+    `<dc:rights>${esc(rights)}</dc:rights><dc:identifier>${esc(cfg.github)}</dc:identifier></rdf:Description>` +
+    `</rdf:RDF></metadata>`;
+  const m = s.match(/<svg\b[^>]*>/i);
+  if (!m) die('no <svg> root element');
+  const at = m.index + m[0].length;
+  return Buffer.from(s.slice(0, at) + '\n  ' + md + s.slice(at), 'utf8');
+}
+
+// ID3v2.4 tag prepended to the MP3 (skips/replaces an existing leading ID3 tag).
+function mp3Mark(buf, cfg, rights) {
+  let start = 0;
+  if (buf.toString('latin1', 0, 3) === 'ID3') {
+    const sz = (buf[6] << 21) | (buf[7] << 14) | (buf[8] << 7) | buf[9];
+    start = 10 + sz + ((buf[5] & 0x10) ? 10 : 0);
+  }
+  const synch = n => Buffer.from([(n >> 21) & 0x7f, (n >> 14) & 0x7f, (n >> 7) & 0x7f, n & 0x7f]);
+  const textFrame = (id, val) => {
+    const data = Buffer.concat([Buffer.from([0x03]), Buffer.from(val, 'utf8')]);   // 0x03 = UTF-8
+    return Buffer.concat([Buffer.from(id, 'latin1'), synch(data.length), Buffer.from([0, 0]), data]);
+  };
+  const frames = Buffer.concat([
+    textFrame('TCOP', `${cfg.year} ${cfg.author}`),
+    textFrame('TPE1', cfg.author),
+    textFrame('TENC', 'authormark/1'),
+    textFrame('TXXX', `authormark\x00${rights}`),
+  ]);
+  const tag = Buffer.concat([Buffer.from('ID3\x04\x00\x00', 'latin1'), synch(frames.length), frames]);
+  return Buffer.concat([tag, buf.subarray(start)]);
+}
+
+// WebP: append an "XMP " chunk (and flip the VP8X XMP flag when the file is
+// already extended). Simple VP8/VP8L files are left with a trailing chunk that
+// compliant readers still pick up.
+function webpMark(buf, cfg, rights) {
+  if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WEBP') die('not a WebP');
+  const xmp = Buffer.from(
+    `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
+    `<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/">` +
+    `<dc:creator>${esc(cfg.author)}</dc:creator><dc:rights>${esc(rights)}</dc:rights>` +
+    `<dc:identifier>${esc(cfg.github)}</dc:identifier></rdf:Description></rdf:RDF></x:xmpmeta>`, 'utf8');
+  const chunks = [];
+  let p = 12;
+  while (p + 8 <= buf.length) {
+    const fourcc = buf.toString('ascii', p, p + 4);
+    const size = buf.readUInt32LE(p + 4);
+    const end = p + 8 + size + (size & 1);
+    if (fourcc !== 'XMP ') chunks.push(buf.subarray(p, Math.min(end, buf.length)));
+    p = end;
+  }
+  const xmpChunk = Buffer.concat([
+    Buffer.from('XMP '), (() => { const b = Buffer.alloc(4); b.writeUInt32LE(xmp.length); return b; })(),
+    xmp, xmp.length & 1 ? Buffer.from([0]) : Buffer.alloc(0),
+  ]);
+  if (chunks[0] && chunks[0].toString('ascii', 0, 4) === 'VP8X') chunks[0][8 + 0] |= 0x04;   // XMP flag
+  const bodyBuf = Buffer.concat([...chunks, xmpChunk]);
+  const riff = Buffer.alloc(12);
+  riff.write('RIFF', 0, 'ascii'); riff.writeUInt32LE(4 + bodyBuf.length, 4); riff.write('WEBP', 8, 'ascii');
+  return Buffer.concat([riff, bodyBuf]);
+}
+
+// ISO-BMFF / QuickTime: a moov/udta with ©cpy ©ART ©nam ©cmt atoms.
+function mp4Mark(buf, cfg) {
+  const box = (type, payload) => {
+    const b = Buffer.alloc(8); b.writeUInt32BE(payload.length + 8, 0); b.write(type, 4, 'latin1');
+    return Buffer.concat([b, payload]);
+  };
+  const cAtom = (type, text) => {
+    const t = Buffer.from(text, 'utf8');
+    const d = Buffer.alloc(4); d.writeUInt16BE(t.length, 0); d.writeUInt16BE(0x55c4, 2);   // len, lang(und)
+    return box(type, Buffer.concat([d, t]));
+  };
+  // locate top-level moov
+  let p = 0, moovStart = -1, moovSize = 0;
+  while (p + 8 <= buf.length) {
+    let size = buf.readUInt32BE(p);
+    const type = buf.toString('latin1', p + 4, p + 8);
+    if (size === 1) size = Number(buf.readBigUInt64BE(p + 8));
+    if (size < 8) break;
+    if (type === 'moov') { moovStart = p; moovSize = size; break; }
+    p += size;
+  }
+  if (moovStart === -1) die('no moov box -- streamed/fragmented MP4 not supported');
+  const udta = box('udta', Buffer.concat([
+    cAtom('\xa9cpy', `${cfg.year} ${cfg.author}`),
+    cAtom('\xa9ART', cfg.author),
+    cAtom('\xa9nam', `${SENTINEL} ${NOREMOVE}`),
+    cAtom('\xa9cmt', `${cfg.github}`),
+  ]));
+  const oldMoov = buf.subarray(moovStart, moovStart + moovSize);
+  const newMoovInner = Buffer.concat([oldMoov.subarray(8), udta]);
+  const newMoov = box('moov', newMoovInner);
+  return Buffer.concat([buf.subarray(0, moovStart), newMoov, buf.subarray(moovStart + moovSize)]);
+}
+
+// PDF incremental update: append an /Info dict + XMP stream, a catalog override
+// pointing at the XMP, a fresh xref section and a trailer chaining to /Prev.
+function pdfMark(buf, cfg, rights) {
+  const s = buf.toString('latin1');
+  if (!s.startsWith('%PDF-')) die('not a PDF');
+  const lastXref = s.lastIndexOf('startxref');
+  if (lastXref === -1) die('no startxref -- linearised/broken PDF');
+  const prev = parseInt(s.slice(lastXref + 9).trim(), 10);
+  const sizeM = s.match(/\/Size\s+(\d+)/g);
+  let size = sizeM ? Math.max(...sizeM.map(x => parseInt(x.replace(/\D/g, ''), 10))) : 0;
+  const rootM = s.match(/\/Root\s+(\d+)\s+(\d+)\s+R/);
+  if (!rootM || !size) die('cannot locate /Root or /Size in trailer');
+  const rootNum = rootM[1];
+
+  let out = buf.length && buf[buf.length - 1] === 0x0a ? Buffer.from(buf) : Buffer.concat([buf, Buffer.from('\n')]);
+  const off = {};
+  const infoNum = ++size, xmpNum = ++size;
+
+  const xmp = `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>` +
+    `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` +
+    `<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator><rdf:Seq><rdf:li>${esc(cfg.author)}</rdf:li></rdf:Seq></dc:creator>` +
+    `<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">${esc(rights)}</rdf:li></rdf:Alt></dc:rights></rdf:Description>` +
+    `</rdf:RDF></x:xmpmeta><?xpacket end="w"?>`;
+
+  const append = str => { out = Buffer.concat([out, Buffer.from(str, 'latin1')]); };
+  off[infoNum] = out.length;
+  append(`${infoNum} 0 obj\n<< /Producer (authormark/1) /Author (${esc(cfg.author)}) ` +
+    `/Copyright (${esc(`${cfg.year} ${cfg.author}`)}) >>\nendobj\n`);
+  off[xmpNum] = out.length;
+  append(`${xmpNum} 0 obj\n<< /Type /Metadata /Subtype /XML /Length ${xmp.length} >>\nstream\n${xmp}\nendstream\nendobj\n`);
+  off[rootNum] = out.length;
+  append(`${rootNum} 0 obj\n<< /Type /Catalog /Metadata ${xmpNum} 0 R >>\nendobj\n`);
+
+  const xrefStart = out.length;
+  const nums = [Number(rootNum), infoNum, xmpNum].sort((a, b) => a - b);
+  let xref = `xref\n`;
+  for (const n of nums) xref += `${n} 1\n${String(off[n]).padStart(10, '0')} 00000 n \n`;
+  xref += `trailer\n<< /Size ${size + 1} /Root ${rootNum} 0 R /Info ${infoNum} 0 R /Prev ${prev} >>\n` +
+    `startxref\n${xrefStart}\n%%EOF\n`;
+  return Buffer.concat([out, Buffer.from(xref, 'latin1')]);
+}
+
+// ---------------------------------------------------------------- robustness harness
+
+async function cmdAttack(args) {
+  const file = positional(args)[0];
+  if (!file || !fs.existsSync(file)) die('usage: authormark attack <marked-image>');
+  const have = t => { try { execFileSync(t, ['-version'], { stdio: 'ignore' }); return true; } catch { return false; } };
+  const magick = have('magick') ? 'magick' : have('convert') ? 'convert' : null;
+  if (!magick) die('needs ImageMagick (`magick` or `convert`) on PATH');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'am-attack-'));
+  const ext = path.extname(file).toLowerCase();
+  const attacks = [
+    ['re-encode (q80)', ['-quality', '80']],
+    ['resize 50%', ['-resize', '50%']],
+    ['resize 150%', ['-resize', '150%']],
+    ['crop 90%', ['-gravity', 'center', '-crop', '90%x90%+0+0', '+repage']],
+    ['rotate 90', ['-rotate', '90']],
+    ['grayscale', ['-colorspace', 'Gray']],
+    ['strip metadata', ['-strip']],
+  ];
+  const probe = p => {
+    const buf = fs.readFileSync(p);
+    let visibleMeta = false, lsb = false;
+    try {
+      if (path.extname(p).toLowerCase() === '.png') {
+        const chunks = pngChunks(buf);
+        visibleMeta = chunks.some(c => (c.type === 'tEXt' || c.type === 'iTXt') && c.data.toString('latin1').includes('authormark'));
+        const img = decodePng(buf);
+        lsb = lsbExtract(img.rgba, img.width, img.height).length > 0;
+      } else {
+        visibleMeta = buf.toString('latin1').includes('authormark');
+      }
+    } catch {}
+    return { visibleMeta, lsb };
+  };
+
+  log(`baseline ${file}:`);
+  const base = probe(file);
+  log(`  metadata mark: ${base.visibleMeta ? 'present' : 'ABSENT'} | LSB payload: ${base.lsb ? 'present' : 'n/a'}`);
+  log(`\nafter each attack (ImageMagick):`);
+  for (const [name, ops] of attacks) {
+    const outP = path.join(tmp, `a${ext || '.png'}`);
+    try {
+      execFileSync(magick, [file, ...ops, outP], { stdio: 'ignore' });
+      const r = probe(outP);
+      log(`  ${name.padEnd(20)}  metadata ${r.visibleMeta ? 'survived' : 'lost   '}   LSB ${r.lsb ? 'survived' : 'lost'}`);
+    } catch {
+      log(`  ${name.padEnd(20)}  (attack failed to run)`);
+    }
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
 }
 
 function scanPng(buf, key) {
@@ -1433,6 +1687,9 @@ const USAGE = `authormark -- layered authorship watermarking
                    [--opacity 0.55] [--scale N] [--no-stego]
        PNG: text chunks + optional visible watermark + hidden LSB payload
        JPEG: EXIF Artist/Copyright + XMP + COM comment (metadata only)
+       GIF/SVG/WebP/MP3/MP4/PDF: metadata-level authorship marks
+  attack <marked-image>  re-encode/resize/crop/rotate/strip via ImageMagick and
+                        report which marks survive each (needs magick or convert)
   hook install           git pre-commit hook that blocks de-watermarked commits`;
 
 async function runCli(argv) {
@@ -1452,6 +1709,7 @@ async function runCli(argv) {
       case 'rotate': cmdRotate(rest); break;
       case 'scan': cmdScan(rest); break;
       case 'image': cmdImage(rest); break;
+      case 'attack': await cmdAttack(rest); break;
       case 'hook': cmdHook(rest); break;
       default: log(USAGE); process.exit(cmd ? 1 : 0);
     }
@@ -1468,8 +1726,9 @@ const isMain = (() => {
 if (isMain) runCli(process.argv.slice(2)).catch(e => die(e.message));
 
 export {
-  canonical, fingerprint, zwEncode, zwDecode, splitHeader, insertIndex,
+  canonical, fingerprint, contentDigest, signer, zwEncode, zwDecode, splitHeader, insertIndex,
   styleFor, renderHeader, headerLines, isHeaderLine, crc32, textMask,
   lsbEmbed, lsbExtract, buildExif, collect, ignored, includedBy, matchGlob,
-  tooBig, hashFile, appendChain, loadAllKeys, runCli,
+  tooBig, hashFile, appendChain, loadAllKeys,
+  gifMark, svgMark, mp3Mark, webpMark, mp4Mark, pdfMark, runCli,
 };
