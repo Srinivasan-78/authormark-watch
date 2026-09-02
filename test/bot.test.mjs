@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.Jov99f_26V419_iNHue_4N
+ * Fingerprint: AMK1.EsCUDnfFCrLJfPyXOtv2QI
  */
 // Unit tests for the pure classifiers, linter and report builder in bot.mjs.
 
@@ -166,6 +166,19 @@ test('lintRepository flags an ungrouped Dependabot config', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('report surfaces a hygiene fix that failed instead of dropping it', () => {
+  const md = buildMarkdownReport({ owner: 'ada' }, {
+    total: 1, scannedTime: 't',
+    authormark: { clean: [], drifted: [], unmarked: [], fixed: [], fixFailed: [] },
+    lintFindings: [], lintFixed: [], awaitingMerge: [],
+    lintFixFailed: [{ name: 'r1', reason: 'git push rejected: stale info' }],
+    prsTagged: [], issuesTagged: [], failedRepos: [],
+  });
+  assert.match(md, /Hygiene Fix Failed/);
+  assert.match(md, /`r1`: git push rejected: stale info/);
+  assert.match(md, /Attention Needed/);
 });
 
 // ---------------------------------------------------------------- lintRepository
