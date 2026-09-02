@@ -10,11 +10,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import fs from 'node:fs';
 
 import {
   canonical, fingerprint, zwEncode, zwDecode, splitHeader, insertIndex,
   styleFor, renderHeader, headerLines, isHeaderLine, crc32,
-  matchGlob, includedBy, ignored,
+  matchGlob, includedBy, ignored, localMarks,
   gifMark, svgMark, mp3Mark, webpMark, mp4Mark, pdfMark,
 } from '../authormark.mjs';
 
@@ -242,4 +243,13 @@ test('pdfMark appends an incremental update with XMP metadata and /Prev', () => 
   assert.ok(out.slice(pdf.length).includes('/Type /Metadata'));
   assert.ok(out.includes('/Prev 50'));
   assert.ok(out.trimEnd().endsWith('%%EOF'));
+});
+
+// ---------------------------------------------------------------- crawl helpers
+
+test('localMarks collects 22-char fingerprints from this repo\'s stamped files', () => {
+  const cfg = JSON.parse(fs.readFileSync(new URL('../.authormark.json', import.meta.url)));
+  const { fps } = localMarks(cfg);
+  assert.ok(fps.length > 0);
+  assert.ok(fps.every(f => /^[A-Za-z0-9_-]{22}$/.test(f)));
 });

@@ -157,6 +157,9 @@ node authormark.mjs check --json .            # machine-readable report
 # Deliberate removal (licence change, upstreaming) — dry unless --force
 node authormark.mjs unstamp path/to/file.js --force
 
+# Hunt for stolen code: your fingerprints/signatures in repos you don't own
+GITHUB_TOKEN=ghp_… node authormark.mjs crawl --json
+
 # Tamper-evident manifest of per-file hashes + keyed proof
 node authormark.mjs seal
 node authormark.mjs verify

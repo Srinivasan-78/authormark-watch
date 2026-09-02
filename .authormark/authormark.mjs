@@ -1431,6 +1431,127 @@ async function cmdAttack(args) {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
+// ---------------------------------------------------------------- theft crawl
+
+// Pull the distinctive strings out of this repo's stamped files: the keyed
+// fingerprints and (for ed25519) signatures. A verbatim copy carries them too.
+function localMarks(cfg) {
+  const files = collect([], DEFAULT_EXTS, cfg);
+  const fps = new Set(), sigs = new Set();
+  for (const rel of files) {
+    if (tooBig(rel, cfg)) continue;
+    const { header } = splitHeader(fs.readFileSync(rel, 'utf8'));
+    if (!header) continue;
+    const fp = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
+    const sg = header.match(/Signature: AMK2\.([A-Za-z0-9_-]{40,})/)?.[1];
+    if (fp) fps.add(fp);
+    if (sg) sigs.add(sg);
+  }
+  return { fps: [...fps], sigs: [...sigs] };
+}
+
+async function ghSearchCode(q, token) {
+  const res = await fetch(`https://api.github.com/search/code?per_page=20&q=${encodeURIComponent(q)}`, {
+    headers: {
+      Accept: 'application/vnd.github.v3+json',
+      'User-Agent': 'authormark-crawl',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
+    const wait = Math.max(1, (Number(res.headers.get('x-ratelimit-reset')) * 1000 - Date.now()) / 1000);
+    warn(`GitHub search rate-limited; sleeping ${Math.ceil(wait)}s`);
+    await new Promise(r => setTimeout(r, wait * 1000 + 500));
+    return ghSearchCode(q, token);
+  }
+  if (!res.ok) { warn(`GitHub search "${q}" -> HTTP ${res.status}`); return []; }
+  return (await res.json()).items || [];
+}
+
+async function sgSearch(literal) {
+  // Sourcegraph public instance -- no auth needed for public code.
+  const q = `context:global content:${JSON.stringify(literal)} count:20`;
+  try {
+    const res = await fetch(`https://sourcegraph.com/.api/search/stream?q=${encodeURIComponent(q)}`, {
+      headers: { Accept: 'text/event-stream', 'User-Agent': 'authormark-crawl' },
+    });
+    if (!res.ok) return [];
+    const text = await res.text();
+    const hits = [];
+    for (const line of text.split('\n')) {
+      if (!line.startsWith('data:')) continue;
+      try {
+        const evt = JSON.parse(line.slice(5));
+        if (!Array.isArray(evt)) continue;
+        for (const m of evt) {
+          if (m.type === 'content' || m.repository) {
+            hits.push({ repo: m.repository, path: m.path, url: m.repository ? `https://${m.repository}` : null });
+          }
+        }
+      } catch {}
+    }
+    return hits;
+  } catch { return []; }
+}
+
+async function cmdCrawl(args) {
+  const cfg = loadConfig();
+  const owner = (cfg.github || '').replace(/^https?:\/\/github\.com\//, '').split('/')[0].toLowerCase();
+  const token = flag(args, '--token') || process.env.GITHUB_TOKEN || process.env.GH_TOKEN ||
+    (() => { try { return execFileSync('gh', ['auth', 'token'], { encoding: 'utf8' }).trim(); } catch { return null; } })();
+  const asJson = args.includes('--json');
+  const ghOnly = args.includes('--github-only');
+  const sgOnly = args.includes('--sourcegraph-only');
+
+  const { fps, sigs } = localMarks(cfg);
+  // Each needle: the literal to search plus which label prefixes it.
+  const needles = [
+    ...sigs.slice(0, 3).map(v => ({ literal: `AMK2.${v}`, kind: 'sig' })),
+    ...fps.map(v => ({ literal: `AMK1.${v}`, kind: 'fp' })),
+  ].slice(0, 8);
+  if (!needles.length) die('no stamped files here -- nothing to search for');
+
+  const foreign = [];
+  const seen = new Set();
+  // "owner/repo" or "host/owner/repo" -> owner segment.
+  const ownerOf = repo => {
+    const segs = repo.toLowerCase().replace(/^https?:\/\//, '').split('/').filter(Boolean);
+    return segs.length >= 2 ? segs[segs.length - 2] : '';
+  };
+  const add = (src, repo, filePath, url) => {
+    if (!repo || (owner && ownerOf(repo) === owner)) return;   // skip your own repos
+    const k = `${repo}::${filePath}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    foreign.push({ via: src, repo, path: filePath || null, url: url || null });
+  };
+
+  if (!sgOnly) {
+    if (!token) warn('no GitHub token (env GITHUB_TOKEN/GH_TOKEN or --token) -- code search needs auth; skipping GitHub');
+    else {
+      for (const n of needles) {
+        for (const it of await ghSearchCode(`"${n.literal}"`, token)) {
+          add('github', it.repository?.full_name, it.path, it.html_url);
+        }
+        await new Promise(r => setTimeout(r, 6500));   // stay under 10 search req/min
+      }
+    }
+  }
+  if (!ghOnly) {
+    for (const n of needles.slice(0, 4)) {
+      for (const h of await sgSearch(n.literal)) add('sourcegraph', h.repo, h.path, h.url);
+    }
+  }
+
+  if (asJson) { process.stdout.write(JSON.stringify({ owner, searched: needles.length, foreign }, null, 2) + '\n'); }
+  else if (!foreign.length) log(`\ncrawl: no copies of ${needles.length} mark(s) found outside @${owner}.`);
+  else {
+    log(`\ncrawl: ${foreign.length} possible copy/copies outside @${owner}:`);
+    for (const f of foreign) log(`  [${f.via}] ${f.repo}${f.path ? ' / ' + f.path : ''}${f.url ? '  ' + f.url : ''}`);
+  }
+  if (foreign.length) process.exitCode = 2;
+}
+
 function scanPng(buf, key) {
   const img = decodePng(buf);
   for (const c of pngChunks(buf)) {
@@ -1690,6 +1811,9 @@ const USAGE = `authormark -- layered authorship watermarking
        GIF/SVG/WebP/MP3/MP4/PDF: metadata-level authorship marks
   attack <marked-image>  re-encode/resize/crop/rotate/strip via ImageMagick and
                         report which marks survive each (needs magick or convert)
+  crawl [--token T] [--github-only|--sourcegraph-only] [--json]
+                        search GitHub code + Sourcegraph for this repo's
+                        fingerprints/signatures in repos you do not own
   hook install           git pre-commit hook that blocks de-watermarked commits`;
 
 async function runCli(argv) {
@@ -1710,6 +1834,7 @@ async function runCli(argv) {
       case 'scan': cmdScan(rest); break;
       case 'image': cmdImage(rest); break;
       case 'attack': await cmdAttack(rest); break;
+      case 'crawl': await cmdCrawl(rest); break;
       case 'hook': cmdHook(rest); break;
       default: log(USAGE); process.exit(cmd ? 1 : 0);
     }
@@ -1729,6 +1854,6 @@ export {
   canonical, fingerprint, contentDigest, signer, zwEncode, zwDecode, splitHeader, insertIndex,
   styleFor, renderHeader, headerLines, isHeaderLine, crc32, textMask,
   lsbEmbed, lsbExtract, buildExif, collect, ignored, includedBy, matchGlob,
-  tooBig, hashFile, appendChain, loadAllKeys,
+  tooBig, hashFile, appendChain, loadAllKeys, localMarks,
   gifMark, svgMark, mp3Mark, webpMark, mp4Mark, pdfMark, runCli,
 };
