@@ -4,7 +4,7 @@
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.vvRVvzIOdtiQ2fe7lHu8CD
+ * Fingerprint: AMK1.IyQohlZxtoLO9n-7TKpN3I
  */
 
 /**
@@ -383,6 +383,91 @@ class GitHubClient {
       body: JSON.stringify({ body }),
     });
   }
+
+  // Classify the newest PR for `branchRef`, looking across every state so a
+  // merged / closed-unmerged PR is distinguishable from "no PR at all".
+  async findBranchPr(owner, repo, branchRef) {
+    const all = await this.listPullRequests(owner, repo, 'all');
+    return classifyBranchPr(all, branchRef);
+  }
+
+  async reopenPullRequest(owner, repo, pullNumber) {
+    return this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ state: 'open' }),
+    });
+  }
+
+  // How many commits `head` is ahead of `base`. 0 means the branch carries
+  // nothing new -- its work already landed. Any error is treated as "unknown"
+  // (returns null) so callers can fall back to opening a PR.
+  async commitsAhead(owner, repo, base, head) {
+    try {
+      const cmp = await this.request(`/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`);
+      return cmp && typeof cmp.ahead_by === 'number' ? cmp.ahead_by : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+// Given the PR list from listPullRequests(..., 'all'), report the status of the
+// newest PR whose head branch is `branchRef`:
+//   MERGED  the change reached the base branch -- this criterion is satisfied
+//   OPEN    a PR is up but NOT merged yet -- still blocking, keep re-flagging
+//   CLOSED  a PR was closed without merging -- needs a reopen or a fresh PR
+//   NONE    no PR was ever opened for this branch
+function classifyBranchPr(prs, branchRef) {
+  const matches = (prs || [])
+    .filter(p => p && p.head && p.head.ref === branchRef)
+    .sort((a, b) => (b.number || 0) - (a.number || 0));
+  const pr = matches[0];
+  if (!pr) return { status: 'NONE', pr: null };
+  if (pr.merged_at) return { status: 'MERGED', pr };
+  if (pr.state === 'open') return { status: 'OPEN', pr };
+  return { status: 'CLOSED', pr };
+}
+
+// Ensure an OPEN, mergeable PR exists for `branch`: reuse an open one, reopen one
+// that was closed unmerged, or open a fresh one. The returned `merged`/`awaiting`
+// flags let the caller keep a repo on the "still blocking" list until its change
+// actually lands on the default branch -- a PR merely existing is not "done".
+async function ensureFixPr(client, owner, repo, branch, prSpec) {
+  const found = await client.findBranchPr(owner, repo, branch);
+  const base = prSpec.base || 'main';
+
+  if (found.status === 'MERGED') {
+    // A same-named PR merged before -- but the branch may have been re-pushed
+    // with fresh work since. Only call it done when nothing is ahead of base.
+    const ahead = await client.commitsAhead(owner, repo, base, branch);
+    if (ahead === 0) {
+      log(`    ✅ PR #${found.pr.number} already merged and no new commits — ${found.pr.html_url}`);
+      return { url: found.pr.html_url, pr: found.pr, merged: true, awaiting: false, action: 'Already merged' };
+    }
+    log(`    🔁 PR #${found.pr.number} merged earlier but \`${branch}\` has new commits — opening a fresh PR`);
+    // fall through to open a new PR
+  } else if (found.status === 'OPEN') {
+    log(`    ⏳ PR #${found.pr.number} already exists but is NOT merged yet — ${found.pr.html_url}`);
+    return { url: found.pr.html_url, pr: found.pr, merged: false, awaiting: true, action: 'Updated PR' };
+  }
+
+  if (found.status === 'CLOSED') {
+    try {
+      const re = await client.reopenPullRequest(owner, repo, found.pr.number);
+      const url = (re && re.html_url) || found.pr.html_url;
+      log(`    ♻️ Reopened PR #${found.pr.number} — was closed without merging — ${url}`);
+      return { url, pr: found.pr, merged: false, awaiting: true, action: 'Reopened PR' };
+    } catch (e) {
+      warn(`Could not reopen PR #${found.pr.number} for ${repo}: ${e.message} — opening a fresh PR`);
+    }
+  }
+
+  const newPr = await client.request(`/repos/${owner}/${repo}/pulls`, {
+    method: 'POST',
+    body: JSON.stringify(prSpec),
+  });
+  log(`    🔀 Opened PR #${newPr.number} — ${newPr.html_url} (awaiting merge)`);
+  return { url: newPr.html_url, pr: newPr, merged: false, awaiting: true, action: 'Opened PR' };
 }
 
 // ---------------------------------------------------------------- Multi-Language Lint & Hygiene
@@ -614,6 +699,14 @@ function lintRepository(repoDir, repoName) {
   }
   if (!hasFile('.github/dependabot.yml') && !hasFile('.github/dependabot.yaml')) {
     findings.standards.push('No Dependabot config (`.github/dependabot.yml`)');
+  } else {
+    const dbRel = hasFile('.github/dependabot.yml') ? '.github/dependabot.yml' : '.github/dependabot.yaml';
+    try {
+      const dbContent = fs.readFileSync(path.join(repoDir, dbRel), 'utf8');
+      if (dbContent.includes('package-ecosystem') && !dbContent.includes('groups:')) {
+        findings.standards.push('Dependabot config is not grouped (ungrouped updates pile up and conflict)');
+      }
+    } catch {}
   }
 
   // 1b. Licence consistency: package.json `license` vs the SPDX headers / LICENSE.
@@ -738,6 +831,43 @@ out/
 .env.production.local
 `;
 
+// Grouped Dependabot config: one PR per ecosystem for all minor/patch bumps,
+// so five lockfile-touching PRs don't pile up and conflict with each other.
+// Majors still arrive as individual PRs -- they need a human look.
+function buildDependabotConfig(ecosystems) {
+  const ecos = ecosystems && ecosystems.length ? ecosystems : ['github-actions'];
+  return `version: 2\nupdates:\n` + ecos.map(e =>
+    `  - package-ecosystem: "${e}"\n` +
+    `    directory: "/"\n` +
+    `    schedule:\n      interval: "weekly"\n` +
+    `    open-pull-requests-limit: 10\n` +
+    `    groups:\n` +
+    `      ${e}-minor-patch:\n` +
+    `        update-types: ["minor", "patch"]\n`
+  ).join('');
+}
+
+// Auto-merge Dependabot PRs once required checks pass -- majors excluded.
+const DEPENDABOT_AUTOMERGE_WORKFLOW = `name: Dependabot auto-merge
+on: pull_request
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  automerge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dependabot/fetch-metadata@v2
+        id: meta
+        with:
+          github-token: "\${{ secrets.GITHUB_TOKEN }}"
+      - if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --squash "\${{ github.event.pull_request.html_url }}"
+        env:
+          GH_TOKEN: "\${{ secrets.GITHUB_TOKEN }}"
+`;
+
 function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot-hygiene') {
   const owner = config.owner;
   const botName = config.botIdentity.name;
@@ -850,19 +980,45 @@ function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot
       createdFiles.push('.github/CONTRIBUTING.md');
       changesMade.push('Created `.github/CONTRIBUTING.md`');
     }
-    if (!fs.existsSync(path.join(ghDir, 'dependabot.yml')) && !fs.existsSync(path.join(ghDir, 'dependabot.yaml'))) {
+    {
       const ecos = [];
       if (fs.existsSync(path.join(repoDir, 'package.json'))) ecos.push('npm');
       if (fs.existsSync(path.join(repoDir, 'requirements.txt')) || fs.existsSync(path.join(repoDir, 'pyproject.toml'))) ecos.push('pip');
       if (fs.existsSync(path.join(repoDir, 'go.mod'))) ecos.push('gomod');
       if (fs.existsSync(path.join(repoDir, 'Cargo.toml'))) ecos.push('cargo');
       ecos.push('github-actions');
-      fs.mkdirSync(ghDir, { recursive: true });
-      fs.writeFileSync(path.join(ghDir, 'dependabot.yml'),
-        `version: 2\nupdates:\n` +
-        ecos.map(e => `  - package-ecosystem: "${e}"\n    directory: "/"\n    schedule:\n      interval: "weekly"\n`).join(''));
-      createdFiles.push('.github/dependabot.yml');
-      changesMade.push('Created `.github/dependabot.yml`');
+
+      const ymlPath = path.join(ghDir, 'dependabot.yml');
+      const yamlPath = path.join(ghDir, 'dependabot.yaml');
+      const existing = fs.existsSync(ymlPath) ? ymlPath : fs.existsSync(yamlPath) ? yamlPath : null;
+
+      if (!existing) {
+        fs.mkdirSync(ghDir, { recursive: true });
+        fs.writeFileSync(ymlPath, buildDependabotConfig(ecos));
+        createdFiles.push('.github/dependabot.yml');
+        changesMade.push('Created grouped `.github/dependabot.yml`');
+      } else {
+        // Upgrade an ungrouped config in place -- ungrouped updates are the main
+        // source of conflicting Dependabot PRs. Only touch a recognisably
+        // bot-shaped file so a hand-tuned config is left alone.
+        const cur = fs.readFileSync(existing, 'utf8');
+        if (cur.includes('package-ecosystem') && !cur.includes('groups:')) {
+          const relYml = path.relative(repoDir, existing).split(path.sep).join('/');
+          fs.writeFileSync(existing, buildDependabotConfig(ecos));
+          createdFiles.push(relYml);
+          changesMade.push(`Grouped \`${relYml}\` to cut Dependabot PR churn`);
+        }
+      }
+
+      // Auto-merge workflow for non-major Dependabot PRs (opt-in via repo
+      // settings: "Allow auto-merge" + required status checks).
+      const amWfPath = path.join(ghDir, 'workflows', 'dependabot-automerge.yml');
+      if (!fs.existsSync(amWfPath)) {
+        fs.mkdirSync(path.join(ghDir, 'workflows'), { recursive: true });
+        fs.writeFileSync(amWfPath, DEPENDABOT_AUTOMERGE_WORKFLOW);
+        createdFiles.push('.github/workflows/dependabot-automerge.yml');
+        changesMade.push('Added Dependabot auto-merge workflow');
+      }
     }
 
     // 5c. Watermark every file we just scaffolded. Skipped when the repo does
@@ -1287,6 +1443,7 @@ or tune features.{authormark,lint}.autoFix for itself.
     authormark: { clean: [], drifted: [], unmarked: [], fixed: [], fixFailed: [] },
     lintFindings: [],
     lintFixed: [],
+    awaitingMerge: [],
     securityAlerts: [],
     prsTagged: [],
     issuesTagged: [],
@@ -1351,30 +1508,29 @@ or tune features.{authormark,lint}.autoFix for itself.
       const fixResult = fixAuthorMark(repoDir, name, config, token);
       if (fixResult.success) {
         log(`    ✅ ${fixResult.message}`);
-        // Create or reuse PR via GitHub API
-        try {
-          const prs = await client.listPullRequests(config.owner, name, 'open');
-          const existingPr = prs.find(p => p.head && p.head.ref === (config.features.authormark.branch || 'authormark'));
-          if (existingPr) {
-            fixPrUrl = existingPr.html_url;
-            summary.authormark.fixed.push({ name, prUrl: fixPrUrl, action: 'Updated PR' });
-          } else if (token) {
-            const newPr = await client.request(`/repos/${config.owner}/${name}/pulls`, {
-              method: 'POST',
-              body: JSON.stringify({
-                title: 'Add authorship watermarks',
-                head: config.features.authormark.branch || 'authormark',
-                base: repoInfo.default_branch || 'main',
-                body: `Opened automatically by Master Bot ([authormark-watch](https://github.com/Srinivasan-78/authormark-watch)).\n\n- Keyed HMAC fingerprint headers\n- Invisible zero-width copy-paste watermark\n- Image watermarks\n- Sealed prior-art \`AUTHORSHIP.json\` manifest\n- CI workflow and agent rules`,
-              }),
+        // Ensure a PR exists AND track it until it is merged into the default
+        // branch -- a PR merely being open is not "done", so the repo stays on
+        // the awaiting-merge list and gets re-flagged next run.
+        if (token) {
+          const amBranch = config.features.authormark.branch || 'authormark';
+          try {
+            const res = await ensureFixPr(client, config.owner, name, amBranch, {
+              title: 'Add authorship watermarks',
+              head: amBranch,
+              base: repoInfo.default_branch || 'main',
+              body: `Opened automatically by Master Bot ([authormark-watch](https://github.com/Srinivasan-78/authormark-watch)).\n\n- Keyed HMAC fingerprint headers\n- Invisible zero-width copy-paste watermark\n- Image watermarks\n- Sealed prior-art \`AUTHORSHIP.json\` manifest\n- CI workflow and agent rules`,
             });
-            fixPrUrl = newPr.html_url;
-            summary.authormark.fixed.push({ name, prUrl: fixPrUrl, action: 'Opened PR' });
-            // Tag newly created PR
-            await client.addLabels(config.owner, name, newPr.number, ['automated-pr', 'bot', 'type/authormark', 'needs-review']);
+            fixPrUrl = res.url;
+            summary.authormark.fixed.push({ name, prUrl: res.url, action: res.action });
+            if (res.awaiting) {
+              summary.awaitingMerge.push({ name, kind: 'AuthorMark watermarks', prNumber: res.pr.number, url: res.url });
+            }
+            if (res.action === 'Opened PR') {
+              await client.addLabels(config.owner, name, res.pr.number, ['automated-pr', 'bot', 'type/authormark', 'needs-review']);
+            }
+          } catch (prErr) {
+            warn(`Could not open PR for ${name}: ${prErr.message}`);
           }
-        } catch (prErr) {
-          warn(`Could not open PR for ${name}: ${prErr.message}`);
         }
       } else {
         errLog(`    ❌ AuthorMark fix failed: ${fixResult.error}`);
@@ -1422,22 +1578,18 @@ or tune features.{authormark,lint}.autoFix for itself.
             log(`    ✅ ${lintFixResult.message} (${lintFixResult.changes.length} change(s))`);
             if (!fixPrUrl && token) {
               try {
-                const prs = await client.listPullRequests(config.owner, name, 'open');
-                const existingPr = prs.find(p => p.head && p.head.ref === hygieneBranch);
-                if (existingPr) {
-                  summary.lintFixed.push({ name, prUrl: existingPr.html_url, action: 'Updated PR', changes: lintFixResult.changes });
-                } else {
-                  const newPr = await client.request(`/repos/${config.owner}/${name}/pulls`, {
-                    method: 'POST',
-                    body: JSON.stringify({
-                      title: 'chore: repository hygiene & standard rules',
-                      head: hygieneBranch,
-                      base: repoInfo.default_branch || 'main',
-                      body: `Opened automatically by Master Bot ([authormark-watch](https://github.com/Srinivasan-78/authormark-watch)) to apply code hygiene and repository standards:\n\n${lintFixResult.changes.map(c => `- ${c}`).join('\n')}`,
-                    }),
-                  });
-                  summary.lintFixed.push({ name, prUrl: newPr.html_url, action: 'Opened PR', changes: lintFixResult.changes });
-                  await client.addLabels(config.owner, name, newPr.number, ['automated-pr', 'bot', 'type/chore', 'needs-review']);
+                const res = await ensureFixPr(client, config.owner, name, hygieneBranch, {
+                  title: 'chore: repository hygiene & standard rules',
+                  head: hygieneBranch,
+                  base: repoInfo.default_branch || 'main',
+                  body: `Opened automatically by Master Bot ([authormark-watch](https://github.com/Srinivasan-78/authormark-watch)) to apply code hygiene and repository standards:\n\n${lintFixResult.changes.map(c => `- ${c}`).join('\n')}`,
+                });
+                summary.lintFixed.push({ name, prUrl: res.url, action: res.action, changes: lintFixResult.changes });
+                if (res.awaiting) {
+                  summary.awaitingMerge.push({ name, kind: 'Repository hygiene', prNumber: res.pr.number, url: res.url });
+                }
+                if (res.action === 'Opened PR') {
+                  await client.addLabels(config.owner, name, res.pr.number, ['automated-pr', 'bot', 'type/chore', 'needs-review']);
                 }
               } catch (prErr) {
                 warn(`Could not open hygiene PR for ${name}: ${prErr.message}`);
@@ -1544,6 +1696,7 @@ or tune features.{authormark,lint}.autoFix for itself.
     summary.authormark.drifted.length > 0 ||
     summary.authormark.unmarked.length > 0 ||
     summary.lintFindings.length > 0 ||
+    summary.awaitingMerge.length > 0 ||
     summary.securityAlerts.length > 0 ||
     summary.failedRepos.length > 0;
 
@@ -1593,7 +1746,9 @@ or tune features.{authormark,lint}.autoFix for itself.
 function buildMarkdownReport(config, summary) {
   const lines = [];
   const am = summary.authormark;
+  const awaitingMerge = summary.awaitingMerge || [];
   const problemsCount = am.drifted.length + am.unmarked.length + summary.lintFindings.length +
+    awaitingMerge.length +
     (summary.securityAlerts ? summary.securityAlerts.length : 0) + summary.failedRepos.length;
 
   lines.push(`# Master Bot Account Dashboard (@${config.owner})`);
@@ -1603,6 +1758,17 @@ function buildMarkdownReport(config, summary) {
     lines.push(`> 🟢 **All Systems Nominal**: Every monitored repository is watermarked, code-linted, and up to date.\n`);
   } else {
     lines.push(`> ⚠️ **Attention Needed**: Found items requiring review across **${problemsCount}** checks.\n`);
+  }
+
+  // Awaiting-merge Section -- fix PRs that exist but have NOT landed yet. These
+  // keep a repo on the attention list: a PR being open is not the finish line.
+  if (awaitingMerge.length > 0) {
+    lines.push(`## ⏳ Awaiting Merge (still blocking)`);
+    lines.push(`These fix PRs exist but are **not merged** into the default branch yet. Each repo below stays flagged until its PR lands.\n`);
+    for (const r of awaitingMerge) {
+      lines.push(`- \`${r.name}\` — ${r.kind}: [PR #${r.prNumber}](${r.url}) — **not merged**`);
+    }
+    lines.push('');
   }
 
   // AuthorMark Section
@@ -1741,8 +1907,8 @@ if (isMain) {
 
 export {
   loadConfig, applyRepoOverrides, sanitize, GitHubClient, lintRepository, walkFiles,
-  classifyPullRequest, classifyIssue, buildMarkdownReport,
-  auditWorkflow, scanGitHistory, pinWorkflowActions,
+  classifyPullRequest, classifyIssue, buildMarkdownReport, classifyBranchPr,
+  auditWorkflow, scanGitHistory, pinWorkflowActions, buildDependabotConfig,
   SECRET_PATTERNS,
 };
 

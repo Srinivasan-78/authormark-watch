@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.botTestPlaceholder0000000000
+ * Fingerprint: AMK1.Jov99f_26V419_iNHue_4N
  */
 // Unit tests for the pure classifiers, linter and report builder in bot.mjs.
 
@@ -18,6 +18,7 @@ import {
   classifyPullRequest, classifyIssue, sanitize,
   buildMarkdownReport, lintRepository, applyRepoOverrides,
   auditWorkflow, pinWorkflowActions, scanGitHistory,
+  classifyBranchPr, buildDependabotConfig,
 } from '../bot.mjs';
 
 // ---------------------------------------------------------------- classifyPullRequest
@@ -115,6 +116,56 @@ test('report lists drifted repositories under an attention heading', () => {
   });
   assert.match(md, /Attention Needed/);
   assert.match(md, /`r1` — 2 stale/);
+});
+
+// ---------------------------------------------------------------- classifyBranchPr
+
+test('classifyBranchPr distinguishes merged / open / closed-unmerged / none', () => {
+  const prs = [
+    { number: 3, state: 'closed', merged_at: null, head: { ref: 'authormark' } },
+    { number: 7, state: 'open', merged_at: null, head: { ref: 'authormark' } },
+    { number: 5, state: 'closed', merged_at: '2026-01-01T00:00:00Z', head: { ref: 'authormark' } },
+    { number: 9, state: 'open', merged_at: null, head: { ref: 'other' } },
+  ];
+  // Newest matching PR (#7) wins -> still OPEN, not merged.
+  assert.deepEqual(classifyBranchPr(prs, 'authormark').status, 'OPEN');
+  assert.equal(classifyBranchPr(prs, 'authormark').pr.number, 7);
+
+  assert.equal(classifyBranchPr([prs[2]], 'authormark').status, 'MERGED');
+  assert.equal(classifyBranchPr([prs[0]], 'authormark').status, 'CLOSED');
+  assert.equal(classifyBranchPr(prs, 'no-such-branch').status, 'NONE');
+  assert.equal(classifyBranchPr([], 'authormark').status, 'NONE');
+});
+
+// ---------------------------------------------------------------- buildDependabotConfig
+
+test('buildDependabotConfig groups every ecosystem and caps open PRs', () => {
+  const yml = buildDependabotConfig(['npm', 'github-actions']);
+  assert.match(yml, /package-ecosystem: "npm"/);
+  assert.match(yml, /package-ecosystem: "github-actions"/);
+  assert.match(yml, /npm-minor-patch:/);
+  assert.match(yml, /github-actions-minor-patch:/);
+  assert.match(yml, /open-pull-requests-limit: 10/);
+  assert.match(yml, /update-types: \["minor", "patch"\]/);
+  // Two ecosystems -> two grouped blocks.
+  assert.equal((yml.match(/groups:/g) || []).length, 2);
+});
+
+test('lintRepository flags an ungrouped Dependabot config', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lint-dependabot-'));
+  try {
+    fs.mkdirSync(path.join(dir, '.github'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.github', 'dependabot.yml'),
+      'version: 2\nupdates:\n  - package-ecosystem: "npm"\n    directory: "/"\n    schedule:\n      interval: "weekly"\n');
+    const f = lintRepository(dir, 'ungrouped');
+    assert.ok(f.standards.some(s => /not grouped/.test(s)));
+
+    fs.writeFileSync(path.join(dir, '.github', 'dependabot.yml'), buildDependabotConfig(['npm']));
+    const f2 = lintRepository(dir, 'grouped');
+    assert.ok(!f2.standards.some(s => /not grouped/.test(s)));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------- lintRepository
