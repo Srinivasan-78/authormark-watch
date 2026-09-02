@@ -20,6 +20,8 @@ import { fileURLToPath } from 'node:url';
 const CWD = process.cwd();
 const CONFIG_FILE = '.authormark.json';
 const MANIFEST_FILE = 'AUTHORSHIP.json';
+const LOG_FILE = 'AUTHORSHIP.log';
+const ATTEST_FILE = 'AUTHORSHIP.intoto.jsonl';
 const SENTINEL = '@authormark v1';
 const NOREMOVE = '-- do not remove';
 // A line only counts as a header when it carries BOTH markers, so docs and
@@ -408,7 +410,9 @@ function cmdCheck(args) {
   // CI has no access to the secret key, so fall back to presence-only checking
   // there: it still blocks a stripped header, it just can't validate the HMAC.
   const presence = args.includes('--presence') || !fs.existsSync(keyPath(cfg));
-  const key = presence ? null : loadKey(cfg);
+  // All keys -- current plus any rotated-out -- so a fingerprint written before
+  // a rotation still verifies.
+  const keys = presence ? [] : loadAllKeys(cfg);
   const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
   let files;
   if (args.includes('--staged')) {
@@ -431,9 +435,9 @@ function cmdCheck(args) {
     const text = fs.readFileSync(rel, 'utf8');
     const { header, body } = splitHeader(text);
     if (!header) { missing.push(rel); continue; }
-    if (!key) continue;
+    if (!keys.length) continue;
     const claimed = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
-    if (claimed !== fingerprint(key, body)) tampered.push(rel);
+    if (!keys.some(k => claimed === fingerprint(k, body))) tampered.push(rel);
   }
   const ok = missing.length === 0 && tampered.length === 0;
 
@@ -477,11 +481,148 @@ function cmdSeal(args) {
     files: entries,
   };
   fs.writeFileSync(path.join(CWD, MANIFEST_FILE), JSON.stringify(manifest, null, 2) + '\n');
+  const chain = appendChain(key, digest);
   log(`sealed ${entries.length} files -> ${MANIFEST_FILE}`);
   log(`digest: ${digest}`);
+  log(`chain:  ${LOG_FILE} seq ${chain.seq} (prev ${chain.prev.slice(0, 12)}…)`);
   log(`\nnotarize it (free, public, timestamped):`);
-  log(`  gpg --armor --detach-sign ${MANIFEST_FILE}      # if you have a GPG key`);
+  log(`  authormark timestamp                            # RFC 3161 TSA token (needs openssl)`);
+  log(`  authormark attest                               # SLSA provenance statement`);
   log(`  ots stamp ${MANIFEST_FILE}                      # OpenTimestamps -> bitcoin-anchored proof`);
+}
+
+// ---------------------------------------------------------------- tamper-evident log
+
+// Every seal appends one line to AUTHORSHIP.log. `prev` is the SHA-256 of the
+// entire file as it stood before the append, so altering or dropping any past
+// line breaks `prev` on every line after it. `mac` binds the entry to the key.
+function appendChain(key, digest) {
+  const p = path.join(CWD, LOG_FILE);
+  const before = fs.existsSync(p) ? fs.readFileSync(p) : Buffer.alloc(0);
+  const prev = before.length ? crypto.createHash('sha256').update(before).digest('hex') : '0'.repeat(64);
+  const seq = before.length ? before.toString('utf8').split('\n').filter(Boolean).length : 0;
+  const rec = { seq, ts: new Date().toISOString(), digest, prev };
+  rec.mac = crypto.createHmac('sha256', key).update(`${rec.seq}\n${rec.ts}\n${rec.digest}\n${rec.prev}`).digest('hex');
+  fs.appendFileSync(p, JSON.stringify(rec) + '\n');
+  return rec;
+}
+
+function cmdChain() {
+  const cfg = loadConfig();
+  const keys = fs.existsSync(keyPath(cfg)) ? loadAllKeys(cfg) : [];
+  const p = path.join(CWD, LOG_FILE);
+  if (!fs.existsSync(p)) die(`no ${LOG_FILE} here -- run:  authormark seal`);
+  const lines = fs.readFileSync(p, 'utf8').split('\n').filter(Boolean);
+  let broken = 0, unsigned = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const rec = JSON.parse(lines[i]);
+    const want = i === 0 ? '0'.repeat(64)
+      : crypto.createHash('sha256').update(lines.slice(0, i).join('\n') + '\n').digest('hex');
+    const linkOk = rec.prev === want;
+    const body = `${rec.seq}\n${rec.ts}\n${rec.digest}\n${rec.prev}`;
+    const macOk = keys.length === 0 || keys.some(k => rec.mac === crypto.createHmac('sha256', k).update(body).digest('hex'));
+    if (!linkOk) broken++;
+    if (!macOk) unsigned++;
+    log(`  #${rec.seq}  ${rec.ts}  ${rec.digest.slice(0, 16)}…  ${linkOk ? 'link OK' : 'LINK BROKEN'}${keys.length ? (macOk ? ' / mac OK' : ' / MAC BAD') : ''}`);
+  }
+  log(`\n${lines.length} entries, ${broken} broken link(s), ${unsigned} bad mac(s).`);
+  if (broken || unsigned) process.exit(1);
+}
+
+// ---------------------------------------------------------------- RFC 3161 timestamp
+
+async function cmdTimestamp(args) {
+  const file = positional(args)[0] || MANIFEST_FILE;
+  if (!fs.existsSync(file)) die(`no ${file} -- run:  authormark seal`);
+  const tsa = flag(args, '--tsa') || 'http://timestamp.digicert.com';
+  try { execFileSync('openssl', ['version'], { stdio: 'ignore' }); }
+  catch { die('openssl not found -- it builds and verifies the RFC 3161 request'); }
+
+  const tsq = `${file}.tsq`, tsr = `${file}.tsr`;
+  execFileSync('openssl', ['ts', '-query', '-data', file, '-sha256', '-cert', '-no_nonce', '-out', tsq]);
+  const res = await fetch(tsa, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/timestamp-query' },
+    body: fs.readFileSync(tsq),
+  });
+  if (!res.ok) die(`TSA ${tsa} returned HTTP ${res.status}`);
+  fs.writeFileSync(tsr, Buffer.from(await res.arrayBuffer()));
+  fs.rmSync(tsq, { force: true });
+  log(`timestamp token -> ${tsr}  (from ${tsa})`);
+  log(`verify:  openssl ts -reply -in ${tsr} -text | grep -E 'Time stamp|Hash'`);
+}
+
+// ---------------------------------------------------------------- SLSA attestation
+
+function cmdAttest(args) {
+  const cfg = loadConfig();
+  const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
+  const files = collect(positional(args), exts, cfg);
+  const subject = files.map(rel => ({ name: rel, digest: { sha256: hashFile(rel).hash } }));
+  const now = new Date().toISOString();
+  const statement = {
+    _type: 'https://in-toto.io/Statement/v1',
+    subject,
+    predicateType: 'https://slsa.dev/provenance/v1',
+    predicate: {
+      buildDefinition: {
+        buildType: 'https://github.com/Srinivasan-78/authormark-watch/attest/v1',
+        externalParameters: { author: cfg.author, github: cfg.github, license: cfg.license || null },
+        internalParameters: {},
+        resolvedDependencies: [],
+      },
+      runDetails: {
+        builder: { id: cfg.github || 'https://github.com/Srinivasan-78/authormark-watch' },
+        metadata: { invocationId: crypto.randomUUID(), startedOn: now, finishedOn: now },
+      },
+    },
+  };
+  const out = flag(args, '-o') || ATTEST_FILE;
+  fs.writeFileSync(path.join(CWD, out), JSON.stringify(statement) + '\n');
+  log(`wrote SLSA provenance for ${subject.length} file(s) -> ${out}`);
+  if (args.includes('--sign')) {
+    try {
+      execFileSync('cosign', ['sign-blob', '--yes', '--output-signature', `${out}.sig`, path.join(CWD, out)], { stdio: 'inherit' });
+      log(`cosign signature -> ${out}.sig`);
+    } catch {
+      warn('cosign not available or sign failed -- statement written unsigned');
+    }
+  } else {
+    log(`sign it:  cosign sign-blob --yes --output-signature ${out}.sig ${out}`);
+  }
+}
+
+// ---------------------------------------------------------------- key rotation
+
+function cmdRotate(args) {
+  const cfg = loadConfig();
+  const kp = keyPath(cfg);
+  if (!fs.existsSync(kp)) die(`no key at ${kp} -- run:  authormark init`);
+  const dir = kp + '.d';
+  fs.mkdirSync(dir, { recursive: true });
+  const tag = new Date().toISOString().replace(/[:.]/g, '-');
+  const archived = path.join(dir, `key-${tag}`);
+  fs.copyFileSync(kp, archived);
+  if (!args.includes('--keep')) {
+    fs.writeFileSync(kp, crypto.randomBytes(32).toString('hex') + '\n', { mode: 0o600 });
+    log(`rotated: new key at ${kp}, previous archived to ${archived}`);
+    log(`old fingerprints still verify (archived keys are tried on check/scan).`);
+    log(`re-stamp to move everything to the new key:  authormark stamp .`);
+  } else {
+    log(`archived a copy of the current key to ${archived} (key unchanged)`);
+  }
+}
+
+// Current key first, then any archived under ~/.authormark.key.d/, newest first.
+function loadAllKeys(cfg) {
+  const keys = [loadKey(cfg)];
+  const dir = keyPath(cfg) + '.d';
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir).sort().reverse()) {
+      try { keys.push(Buffer.from(fs.readFileSync(path.join(dir, f), 'utf8').trim(), 'hex')); } catch {}
+    }
+  }
+  return keys;
 }
 
 function cmdVerify(args) {
@@ -504,19 +645,22 @@ function cmdVerify(args) {
 
 function cmdScan(args) {
   const cfg = fs.existsSync(path.join(CWD, CONFIG_FILE)) ? loadConfig() : null;
-  const key = cfg && fs.existsSync(keyPath(cfg)) ? loadKey(cfg) : null;
+  const keys = cfg && fs.existsSync(keyPath(cfg)) ? loadAllKeys(cfg) : [];
   for (const f of positional(args)) {
     log(`\n=== ${f}`);
     const buf = fs.readFileSync(f);
     const ext = path.extname(f).toLowerCase();
-    if (ext === '.png') { scanPng(buf, key); continue; }
+    if (ext === '.png') { scanPng(buf, keys[0] || null); continue; }
     if (ext === '.jpg' || ext === '.jpeg') { scanJpeg(buf); continue; }
     const text = buf.toString('utf8');
     const { header, body } = splitHeader(text);
     if (header) {
       log(header.split('\n').map(l => '  ' + l.trim()).join('\n'));
       const claimed = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
-      if (key) log(`  -> fingerprint ${claimed === fingerprint(key, body) ? 'VALID for your key' : 'does NOT match current content'}`);
+      if (keys.length) {
+        const hit = keys.findIndex(k => claimed === fingerprint(k, body));
+        log(`  -> fingerprint ${hit === 0 ? 'VALID for your current key' : hit > 0 ? `VALID for archived key #${hit}` : 'does NOT match current content'}`);
+      }
     } else log('  no visible header');
     const zw = zwDecode(text);
     if (zw.length) log(`  hidden zero-width mark(s): ${zw.join(', ')}`);
@@ -1140,8 +1284,14 @@ const USAGE = `authormark -- layered authorship watermarking
   check [paths...] | check --staged | check --json
        exit 1 if any file is unmarked or its fingerprint is stale (for CI/hooks)
 
-  seal [paths...]        write AUTHORSHIP.json: per-file hashes + keyed proof
+  seal [paths...]        write AUTHORSHIP.json + append a hash-chained AUTHORSHIP.log entry
   verify [manifest]      re-verify a manifest against the working tree
+  chain                  walk AUTHORSHIP.log: check every prev-hash link and keyed mac
+  timestamp [file] [--tsa URL]
+                        get an RFC 3161 token for AUTHORSHIP.json (needs openssl)
+  attest [paths...] [-o file] [--sign]
+                        write a SLSA provenance statement; --sign calls cosign
+  rotate [--keep]       new secret key; old one archived and still tried on check/scan
   scan <files...>        show every mark found in a source file or image
   image <files...> [-o out] [--inplace] [--visible "txt"] [--tile]
                    [--opacity 0.55] [--scale N] [--no-stego]
@@ -1149,7 +1299,7 @@ const USAGE = `authormark -- layered authorship watermarking
        JPEG: EXIF Artist/Copyright + XMP + COM comment (metadata only)
   hook install           git pre-commit hook that blocks de-watermarked commits`;
 
-function runCli(argv) {
+async function runCli(argv) {
   const [cmd, ...rest] = argv;
   try {
     switch (cmd) {
@@ -1160,6 +1310,10 @@ function runCli(argv) {
       case 'check': cmdCheck(rest); break;
       case 'seal': cmdSeal(rest); break;
       case 'verify': cmdVerify(rest); break;
+      case 'chain': cmdChain(rest); break;
+      case 'timestamp': await cmdTimestamp(rest); break;
+      case 'attest': cmdAttest(rest); break;
+      case 'rotate': cmdRotate(rest); break;
       case 'scan': cmdScan(rest); break;
       case 'image': cmdImage(rest); break;
       case 'hook': cmdHook(rest); break;
@@ -1175,11 +1329,11 @@ const isMain = (() => {
   try { return fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1]); }
   catch { return false; }
 })();
-if (isMain) runCli(process.argv.slice(2));
+if (isMain) runCli(process.argv.slice(2)).catch(e => die(e.message));
 
 export {
   canonical, fingerprint, zwEncode, zwDecode, splitHeader, insertIndex,
   styleFor, renderHeader, headerLines, isHeaderLine, crc32, textMask,
   lsbEmbed, lsbExtract, buildExif, collect, ignored, includedBy, matchGlob,
-  tooBig, hashFile, runCli,
+  tooBig, hashFile, appendChain, loadAllKeys, runCli,
 };
