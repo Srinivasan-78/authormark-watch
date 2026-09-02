@@ -179,12 +179,27 @@ and `%` comment syntaxes, plus named files (`Dockerfile`, `Rakefile`, …).
 
 | key | meaning |
 |-----|---------|
+| `algo` | `hmac` (default) or `ed25519` — see below |
+| `publicKey` | base64 SPKI of the ed25519 public key (written by `init --ed25519`) |
 | `ignore` | array of paths / dir-prefixes / globs (`*`, `**`, `?`) never stamped |
 | `include` | if non-empty, an allowlist of globs — only matching files are stamped |
 | `reuse` | `true` adds a REUSE-spec `SPDX-FileCopyrightText:` line to each header |
 | `maxBytes` | files larger than this (default 2 MiB) are skipped by stamp/check |
 
 A `.authormarkignore` file (gitignore-style, one pattern per line) is merged into `ignore`.
+
+### HMAC vs ed25519
+
+- **`hmac`** (default): the `Fingerprint:` line is a keyed HMAC. Only the holder of
+  `~/.authormark.key` can verify authenticity; CI without the key does a
+  presence-only check.
+- **`ed25519`** (`authormark init --ed25519`): the header also carries a
+  `Signature:` line. The **public** key lives in `.authormark.json`, so CI and any
+  third party can cryptographically verify authorship with **no secret** —
+  `authormark check .` verifies signatures in the workflow. `seal`, the
+  `AUTHORSHIP.log` chain, and `verify` all use ed25519 proofs in this mode.
+  `rotate` mints a new keypair and keeps the retired public key so old
+  signatures still verify.
 
 ---
 

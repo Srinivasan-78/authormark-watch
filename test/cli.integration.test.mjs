@@ -93,3 +93,55 @@ test('attest writes an in-toto SLSA provenance statement', () => {
   assert.equal(st.predicateType, 'https://slsa.dev/provenance/v1');
   assert.ok(st.subject.some(s => s.name === 'a.js' && /^[0-9a-f]{64}$/.test(s.digest.sha256)));
 });
+
+// ---------------------------------------------------------------- ed25519 mode
+
+test('ed25519: init embeds a public key and stamp writes a Signature line', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'am-ed-'));
+  const h = fs.mkdtempSync(path.join(os.tmpdir(), 'am-edh-'));
+  const ed = (...a) => execFileSync(process.execPath, [AM, ...a], {
+    cwd: d, encoding: 'utf8', env: { ...process.env, HOME: h, USERPROFILE: h },
+  });
+  try {
+    ed('init', '--ed25519', '--author', 'E', '--email', 'e@e.co', '--github', 'https://github.com/e');
+    const cfg = JSON.parse(fs.readFileSync(path.join(d, '.authormark.json'), 'utf8'));
+    assert.equal(cfg.algo, 'ed25519');
+    assert.match(cfg.publicKey, /^[A-Za-z0-9+/=]+$/);
+
+    fs.writeFileSync(path.join(d, 'a.js'), 'export const x = 1\n');
+    ed('stamp', 'a.js');
+    assert.match(fs.readFileSync(path.join(d, 'a.js'), 'utf8'), /Signature: AMK2\./);
+
+    // The decisive property: verification works with NO private key present.
+    fs.rmSync(path.join(h, '.authormark.key'));
+    assert.match(ed('check', '.'), /valid ed25519 signature/);
+
+    // A real edit must fail verification.
+    fs.appendFileSync(path.join(d, 'a.js'), 'export const y = 2\n');
+    assert.throws(() => ed('check', '.'), /Command failed|BAD SIGNATURE/);
+  } finally {
+    fs.rmSync(d, { recursive: true, force: true });
+    fs.rmSync(h, { recursive: true, force: true });
+  }
+});
+
+test('ed25519: seal proof and log chain verify from the public key', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'am-ed2-'));
+  const h = fs.mkdtempSync(path.join(os.tmpdir(), 'am-ed2h-'));
+  const ed = (...a) => execFileSync(process.execPath, [AM, ...a], {
+    cwd: d, encoding: 'utf8', env: { ...process.env, HOME: h, USERPROFILE: h },
+  });
+  try {
+    ed('init', '--ed25519', '--author', 'E', '--email', 'e@e.co', '--github', 'https://github.com/e');
+    fs.writeFileSync(path.join(d, 'a.js'), 'const x = 1\n');
+    ed('stamp', 'a.js');
+    ed('seal');
+    const m = JSON.parse(fs.readFileSync(path.join(d, 'AUTHORSHIP.json'), 'utf8'));
+    assert.equal(m.algo, 'ed25519');
+    assert.match(ed('verify'), /ed25519 proof: OK/);
+    assert.match(ed('chain'), /0 broken link\(s\), 0 bad mac\(s\)/);
+  } finally {
+    fs.rmSync(d, { recursive: true, force: true });
+    fs.rmSync(h, { recursive: true, force: true });
+  }
+});

@@ -164,9 +164,76 @@ function fingerprint(key, body) {
   return crypto.createHmac('sha256', key).update(canonical(body)).digest('base64url').slice(0, 22);
 }
 
+// Unkeyed content digest for the Fingerprint: line in ed25519 mode -- it is only
+// a cheap "did the body change" marker; the Signature: line is the real proof.
+function contentDigest(body) {
+  return crypto.createHash('sha256').update(canonical(body)).digest('base64url').slice(0, 22);
+}
+
+const SIG_LABEL = 'Signature: AMK2.';
+
+// One object that hides the hmac-vs-ed25519 split from every command.
+//   fpFor(body)        -> string for the `Fingerprint:` line
+//   sigFor(body)       -> string for the `Signature:` line, or null (hmac / no key)
+//   verify(header,body)-> true | false | null   (null = can only presence-check)
+//   macFor(str)        -> proof string for a manifest / log entry, or null
+//   macVerify(str,mac) -> true | false | null
+function signer(cfg) {
+  const algo = cfg.algo === 'ed25519' ? 'ed25519' : 'hmac';
+
+  if (algo === 'ed25519') {
+    const pubs = [];
+    if (cfg.publicKey) {
+      try { pubs.push(crypto.createPublicKey({ key: Buffer.from(cfg.publicKey, 'base64'), format: 'der', type: 'spki' })); } catch {}
+    }
+    pubs.push(...loadArchivedPubs(cfg));
+    let priv = null;
+    const kp = keyPath(cfg);
+    if (fs.existsSync(kp)) {
+      try { priv = crypto.createPrivateKey(fs.readFileSync(kp, 'utf8')); } catch {}
+    }
+    const sign = str => crypto.sign(null, Buffer.from(str), priv).toString('base64url');
+    const anyPub = (str, macB64) => {
+      const m = Buffer.from(macB64, 'base64url');
+      return pubs.some(pk => { try { return crypto.verify(null, Buffer.from(str), pk, m); } catch { return false; } });
+    };
+    return {
+      algo,
+      fpFor: body => contentDigest(body),
+      sigFor: priv ? body => sign(canonical(body)) : null,
+      verify(header, body) {
+        const sig = header.match(/Signature: AMK2\.([A-Za-z0-9_-]+)/)?.[1];
+        const fp = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
+        if (!pubs.length || !sig) return fp ? (fp === contentDigest(body) ? null : false) : null;
+        return anyPub(canonical(body), sig);
+      },
+      macFor: priv ? sign : null,
+      macVerify: (str, mac) => (pubs.length ? anyPub(str, mac) : null),
+    };
+  }
+
+  const keys = fs.existsSync(keyPath(cfg)) ? loadAllKeys(cfg) : [];
+  const hmac = (k, s) => crypto.createHmac('sha256', k).update(s).digest('hex');
+  return {
+    algo,
+    fpFor: body => keys.length ? fingerprint(keys[0], body) : contentDigest(body),
+    sigFor: null,
+    verify(header, body) {
+      if (!keys.length) return null;
+      const fp = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
+      return keys.some(k => fp === fingerprint(k, body));
+    },
+    macFor: keys.length ? str => hmac(keys[0], str) : null,
+    macVerify(str, mac) {
+      if (!keys.length) return null;
+      return keys.some(k => hmac(k, str) === mac);
+    },
+  };
+}
+
 // ---------------------------------------------------------------- header build / strip
 
-function headerLines(cfg, fp) {
+function headerLines(cfg, fp, sig) {
   const who = `${cfg.year} ${cfg.author}${cfg.email ? ` <${cfg.email}>` : ''}`;
   const l = [
     `${SENTINEL} ${NOREMOVE} (authorship watermark)`,
@@ -177,21 +244,22 @@ function headerLines(cfg, fp) {
   if (cfg.reuse) l.push(`SPDX-FileCopyrightText: ${who}`);
   if (cfg.license) l.push(`SPDX-License-Identifier: ${cfg.license}`);
   l.push(`${FP_LABEL}${fp}`);
+  if (sig) l.push(`${SIG_LABEL}${sig}`);   // ed25519: verifiable with the public key alone
   return l;
 }
 
-function renderHeader(cfg, fp, style, zw) {
-  let lines = headerLines(cfg, fp);
+function renderHeader(cfg, fp, style, zw, sig) {
+  let lines = headerLines(cfg, fp, sig);
   if (zw) lines[0] += zwEncode(fp);
   if (style.prefix) return lines.map(l => style.prefix + l).join('\n') + '\n';
   return [style.open, ...lines.map(l => style.line + l), style.close].join('\n') + '\n';
 }
 
-// A header we wrote is at most 6 lines plus its delimiters; never scan further.
+// A header we wrote is at most 7 lines plus its delimiters; never scan further.
 // Without this bound a sentinel line whose `Fingerprint:` was deleted would make
 // the search run to EOF and stamp would then overwrite the whole file with a header.
-const HEADER_MAX_LINES = 10;
-const HEADER_FIELD = /(Copyright \(c\)|Author:|SPDX-File(?:CopyrightText|Contributor):|SPDX-License-Identifier:|Fingerprint: )/;
+const HEADER_MAX_LINES = 12;
+const HEADER_FIELD = /(Copyright \(c\)|Author:|SPDX-File(?:CopyrightText|Contributor):|SPDX-License-Identifier:|Fingerprint: |Signature: )/;
 
 // Returns {header, body} -- header is '' when the file is unstamped.
 function splitHeader(text) {
@@ -214,7 +282,11 @@ function splitHeader(text) {
       end = i;
       while (end + 1 < limit && HEADER_FIELD.test(lines[end + 1])) end++;
     }
-  } else if (end < lines.length - 1 && /^\s*(\*\/|-->)\s*$/.test(lines[end + 1])) end++;
+  } else {
+    // An ed25519 Signature: line sits just below Fingerprint: -- keep it with the header.
+    if (end + 1 < limit && lines[end + 1].includes(SIG_LABEL)) end++;
+    if (end < lines.length - 1 && /^\s*(\*\/|-->)\s*$/.test(lines[end + 1])) end++;
+  }
   return { header: lines.slice(start, end + 1).join('\n'), body: lines.slice(0, start).concat(lines.slice(end + 1)).join('\n'), at: start };
 }
 
@@ -315,27 +387,45 @@ function cmdInit(args) {
   const email = flag(args, '--email') || g.email || tryGit('user.email') || '';
   const github = flag(args, '--github') || g.github || '';
   const license = flag(args, '--license') || g.license || 'MIT';
+  const ed25519 = args.includes('--ed25519') || g.algo === 'ed25519';
   const cfg = {
     author, email, github, year: new Date().getFullYear(), license,
     keyFile: '~/.authormark.key',
+    algo: ed25519 ? 'ed25519' : 'hmac',
     ignore: [], include: [],
     reuse: flag(args, '--reuse') === 'true' || args.includes('--reuse') || g.reuse || false,
     maxBytes: g.maxBytes ?? 2 * 1024 * 1024,
   };
-  fs.writeFileSync(path.join(CWD, CONFIG_FILE), JSON.stringify(cfg, null, 2) + '\n');
   const kp = keyPath(cfg);
-  if (fs.existsSync(kp)) {
+  if (ed25519) {
+    if (fs.existsSync(kp)) {
+      log(`key kept: ${kp} (already exists -- never regenerate, old signatures would break)`);
+      try {
+        const pub = crypto.createPublicKey(crypto.createPrivateKey(fs.readFileSync(kp, 'utf8')));
+        cfg.publicKey = pub.export({ type: 'spki', format: 'der' }).toString('base64');
+      } catch { die(`existing ${kp} is not an ed25519 private key -- move it aside first`); }
+    } else {
+      const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+      fs.writeFileSync(kp, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+      cfg.publicKey = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+      log(`ed25519 keypair created: private ${kp} (chmod 600 -- BACK THIS UP), public key embedded in ${CONFIG_FILE}`);
+    }
+  } else if (fs.existsSync(kp)) {
     log(`key kept: ${kp} (already exists -- never regenerate, old fingerprints would break)`);
   } else {
     fs.writeFileSync(kp, crypto.randomBytes(32).toString('hex') + '\n', { mode: 0o600 });
     log(`key created: ${kp}  (chmod 600 -- BACK THIS UP, it is your proof of authorship)`);
   }
-  log(`config written: ${CONFIG_FILE}`);
+  fs.writeFileSync(path.join(CWD, CONFIG_FILE), JSON.stringify(cfg, null, 2) + '\n');
+  log(`config written: ${CONFIG_FILE}${ed25519 ? '  (algo: ed25519 -- CI verifies with the public key, no secret needed)' : ''}`);
   if (!args.includes('--quiet')) log(`\nnext:  authormark stamp app components lib`);
 }
 
 function cmdStamp(args) {
-  const cfg = loadConfig(), key = loadKey(cfg);
+  const cfg = loadConfig();
+  const s = signer(cfg);
+  if (cfg.algo === 'ed25519' && !s.sigFor) die(`ed25519 mode but no usable private key at ${keyPath(cfg)}`);
+  if (cfg.algo !== 'ed25519') loadKey(cfg);  // fail early with the familiar message if the hmac key is gone
   const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
   const zw = args.includes('--zw');
   const dry = args.includes('--dry');
@@ -347,8 +437,9 @@ function cmdStamp(args) {
     const orig = fs.readFileSync(rel, 'utf8');
     const style = styleFor(rel);
     const { header, body } = splitHeader(orig);
-    const fp = fingerprint(key, body);
-    const next = renderHeader(cfg, fp, style, zw);
+    const fp = s.fpFor(body);
+    const sig = s.sigFor ? s.sigFor(body) : null;
+    const next = renderHeader(cfg, fp, style, zw, sig);
     if (header && header + '\n' === next.replace(/\n$/, '') + '\n') { same++; continue; }
     const at = insertIndex(body);
     const out = body.slice(0, at) + next + body.slice(at);
@@ -407,12 +498,12 @@ function cmdUnstamp(args) {
 
 function cmdCheck(args) {
   const cfg = loadConfig();
-  // CI has no access to the secret key, so fall back to presence-only checking
-  // there: it still blocks a stripped header, it just can't validate the HMAC.
-  const presence = args.includes('--presence') || !fs.existsSync(keyPath(cfg));
-  // All keys -- current plus any rotated-out -- so a fingerprint written before
-  // a rotation still verifies.
-  const keys = presence ? [] : loadAllKeys(cfg);
+  // ed25519 verifies from the public key in config (works in CI with no secret).
+  // hmac needs the local key; without it we can only presence-check.
+  const forcePresence = args.includes('--presence') ||
+    (cfg.algo !== 'ed25519' && !fs.existsSync(keyPath(cfg)));
+  const s = forcePresence ? null : signer(cfg);
+  const mode = forcePresence ? 'presence' : (cfg.algo === 'ed25519' ? 'ed25519' : 'hmac');
   const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
   let files;
   if (args.includes('--staged')) {
@@ -435,15 +526,14 @@ function cmdCheck(args) {
     const text = fs.readFileSync(rel, 'utf8');
     const { header, body } = splitHeader(text);
     if (!header) { missing.push(rel); continue; }
-    if (!keys.length) continue;
-    const claimed = header.match(/Fingerprint: AMK1\.([A-Za-z0-9_-]{22})/)?.[1];
-    if (!keys.some(k => claimed === fingerprint(k, body))) tampered.push(rel);
+    if (!s) continue;                       // presence-only
+    if (s.verify(header, body) === false) tampered.push(rel);
   }
   const ok = missing.length === 0 && tampered.length === 0;
 
   if (args.includes('--json')) {
     process.stdout.write(JSON.stringify({
-      ok, mode: presence ? 'presence' : 'verified',
+      ok, mode,
       total: files.length, skipped, missing, stale: tampered,
     }, null, 2) + '\n');
     if (!ok) process.exit(1);
@@ -451,16 +541,23 @@ function cmdCheck(args) {
   }
 
   for (const f of missing) console.error(`  MISSING watermark: ${f}`);
-  for (const f of tampered) console.error(`  STALE fingerprint:  ${f}  (re-run: authormark stamp ${f})`);
+  for (const f of tampered) console.error(`  ${mode === 'ed25519' ? 'BAD SIGNATURE' : 'STALE fingerprint'}: ${f}  (re-run: authormark stamp ${f})`);
   if (!ok) {
-    console.error(`\nauthormark: ${missing.length} unmarked, ${tampered.length} stale of ${files.length}.`);
+    console.error(`\nauthormark: ${missing.length} unmarked, ${tampered.length} ${mode === 'ed25519' ? 'unverifiable' : 'stale'} of ${files.length}.`);
     process.exit(1);
   }
-  log(`authormark: all ${files.length} files carry a watermark${presence ? ' (presence only -- no key here, fingerprints not verified).' : ' with a valid fingerprint.'}`);
+  const tail = mode === 'presence' ? ' (presence only -- fingerprints not verified).'
+    : mode === 'ed25519' ? ' with a valid ed25519 signature.'
+    : ' with a valid fingerprint.';
+  log(`authormark: all ${files.length} files carry a watermark${tail}`);
 }
 
 function cmdSeal(args) {
-  const cfg = loadConfig(), key = loadKey(cfg);
+  const cfg = loadConfig();
+  const s = signer(cfg);
+  if (!s.macFor) die(cfg.algo === 'ed25519'
+    ? `ed25519 mode but no usable private key at ${keyPath(cfg)}`
+    : `secret key missing at ${keyPath(cfg)} -- run:  authormark init`);
   const exts = flag(args, '--ext')?.split(',').map(e => (e.startsWith('.') ? e : '.' + e)) || DEFAULT_EXTS;
   const files = collect(positional(args), exts, cfg);
   const entries = files.map(rel => {
@@ -473,15 +570,16 @@ function cmdSeal(args) {
     .update(entries.map(e => `${e.sha256}  ${e.path}`).join('\n')).digest('hex');
   const manifest = {
     schema: 'authormark/manifest/1',
+    algo: s.algo,
     author: cfg.author, email: cfg.email, github: cfg.github,
     sealedAt: new Date().toISOString(),
     fileCount: entries.length,
     digest,
-    proof: crypto.createHmac('sha256', key).update(digest).digest('hex'),
+    proof: s.macFor(digest),
     files: entries,
   };
   fs.writeFileSync(path.join(CWD, MANIFEST_FILE), JSON.stringify(manifest, null, 2) + '\n');
-  const chain = appendChain(key, digest);
+  const chain = appendChain(s, digest);
   log(`sealed ${entries.length} files -> ${MANIFEST_FILE}`);
   log(`digest: ${digest}`);
   log(`chain:  ${LOG_FILE} seq ${chain.seq} (prev ${chain.prev.slice(0, 12)}…)`);
@@ -495,21 +593,22 @@ function cmdSeal(args) {
 
 // Every seal appends one line to AUTHORSHIP.log. `prev` is the SHA-256 of the
 // entire file as it stood before the append, so altering or dropping any past
-// line breaks `prev` on every line after it. `mac` binds the entry to the key.
-function appendChain(key, digest) {
+// line breaks `prev` on every line after it. `mac` binds the entry to the key
+// (HMAC in hmac mode, an ed25519 signature otherwise).
+function appendChain(s, digest) {
   const p = path.join(CWD, LOG_FILE);
   const before = fs.existsSync(p) ? fs.readFileSync(p) : Buffer.alloc(0);
   const prev = before.length ? crypto.createHash('sha256').update(before).digest('hex') : '0'.repeat(64);
   const seq = before.length ? before.toString('utf8').split('\n').filter(Boolean).length : 0;
   const rec = { seq, ts: new Date().toISOString(), digest, prev };
-  rec.mac = crypto.createHmac('sha256', key).update(`${rec.seq}\n${rec.ts}\n${rec.digest}\n${rec.prev}`).digest('hex');
+  rec.mac = s.macFor(`${rec.seq}\n${rec.ts}\n${rec.digest}\n${rec.prev}`);
   fs.appendFileSync(p, JSON.stringify(rec) + '\n');
   return rec;
 }
 
 function cmdChain() {
   const cfg = loadConfig();
-  const keys = fs.existsSync(keyPath(cfg)) ? loadAllKeys(cfg) : [];
+  const s = signer(cfg);
   const p = path.join(CWD, LOG_FILE);
   if (!fs.existsSync(p)) die(`no ${LOG_FILE} here -- run:  authormark seal`);
   const lines = fs.readFileSync(p, 'utf8').split('\n').filter(Boolean);
@@ -519,11 +618,10 @@ function cmdChain() {
     const want = i === 0 ? '0'.repeat(64)
       : crypto.createHash('sha256').update(lines.slice(0, i).join('\n') + '\n').digest('hex');
     const linkOk = rec.prev === want;
-    const body = `${rec.seq}\n${rec.ts}\n${rec.digest}\n${rec.prev}`;
-    const macOk = keys.length === 0 || keys.some(k => rec.mac === crypto.createHmac('sha256', k).update(body).digest('hex'));
+    const macRes = s.macVerify(`${rec.seq}\n${rec.ts}\n${rec.digest}\n${rec.prev}`, rec.mac);
     if (!linkOk) broken++;
-    if (!macOk) unsigned++;
-    log(`  #${rec.seq}  ${rec.ts}  ${rec.digest.slice(0, 16)}…  ${linkOk ? 'link OK' : 'LINK BROKEN'}${keys.length ? (macOk ? ' / mac OK' : ' / MAC BAD') : ''}`);
+    if (macRes === false) unsigned++;
+    log(`  #${rec.seq}  ${rec.ts}  ${rec.digest.slice(0, 16)}…  ${linkOk ? 'link OK' : 'LINK BROKEN'}${macRes === null ? '' : (macRes ? ' / mac OK' : ' / MAC BAD')}`);
   }
   log(`\n${lines.length} entries, ${broken} broken link(s), ${unsigned} bad mac(s).`);
   if (broken || unsigned) process.exit(1);
@@ -603,14 +701,44 @@ function cmdRotate(args) {
   const tag = new Date().toISOString().replace(/[:.]/g, '-');
   const archived = path.join(dir, `key-${tag}`);
   fs.copyFileSync(kp, archived);
-  if (!args.includes('--keep')) {
+
+  if (args.includes('--keep')) {
+    log(`archived a copy of the current key to ${archived} (key unchanged)`);
+    return;
+  }
+
+  if (cfg.algo === 'ed25519') {
+    // Stash the retiring public key so signatures made under it still verify.
+    if (cfg.publicKey) fs.writeFileSync(path.join(dir, `pub-${tag}.b64`), cfg.publicKey + '\n');
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+    fs.writeFileSync(kp, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+    cfg.publicKey = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    // Rewrite config, preserving key order but with the fresh public key.
+    fs.writeFileSync(path.join(CWD, CONFIG_FILE), JSON.stringify(cfg, null, 2) + '\n');
+    log(`rotated ed25519 keypair: new private ${kp}, public key updated in ${CONFIG_FILE}`);
+  } else {
     fs.writeFileSync(kp, crypto.randomBytes(32).toString('hex') + '\n', { mode: 0o600 });
     log(`rotated: new key at ${kp}, previous archived to ${archived}`);
-    log(`old fingerprints still verify (archived keys are tried on check/scan).`);
-    log(`re-stamp to move everything to the new key:  authormark stamp .`);
-  } else {
-    log(`archived a copy of the current key to ${archived} (key unchanged)`);
   }
+  log(`old marks still verify (archived keys/pubkeys are tried on check/scan/chain).`);
+  log(`re-stamp to move everything to the new key:  authormark stamp .`);
+}
+
+// Archived ed25519 public keys (base64 DER), newest first.
+function loadArchivedPubs(cfg) {
+  const dir = keyPath(cfg) + '.d';
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const f of fs.readdirSync(dir).sort().reverse()) {
+    if (!f.startsWith('pub-')) continue;
+    try {
+      out.push(crypto.createPublicKey({
+        key: Buffer.from(fs.readFileSync(path.join(dir, f), 'utf8').trim(), 'base64'),
+        format: 'der', type: 'spki',
+      }));
+    } catch {}
+  }
+  return out;
 }
 
 // Current key first, then any archived under ~/.authormark.key.d/, newest first.
@@ -619,6 +747,7 @@ function loadAllKeys(cfg) {
   const dir = keyPath(cfg) + '.d';
   if (fs.existsSync(dir)) {
     for (const f of fs.readdirSync(dir).sort().reverse()) {
+      if (!f.startsWith('key-')) continue;
       try { keys.push(Buffer.from(fs.readFileSync(path.join(dir, f), 'utf8').trim(), 'hex')); } catch {}
     }
   }
@@ -626,21 +755,24 @@ function loadAllKeys(cfg) {
 }
 
 function cmdVerify(args) {
-  const cfg = loadConfig(), key = loadKey(cfg);
+  const cfg = loadConfig();
+  const s = signer(cfg);
   const file = positional(args)[0] || MANIFEST_FILE;
   const m = JSON.parse(fs.readFileSync(file, 'utf8'));
   const digest = crypto.createHash('sha256')
     .update(m.files.map(e => `${e.sha256}  ${e.path}`).join('\n')).digest('hex');
-  const proofOk = m.proof === crypto.createHmac('sha256', key).update(digest).digest('hex');
+  const proofRes = s.macVerify(m.digest, m.proof);
   log(`manifest digest: ${digest === m.digest ? 'OK' : 'MISMATCH'}`);
-  log(`your HMAC proof: ${proofOk ? 'OK -- this manifest was sealed with your key' : 'FAIL -- not sealed by your key'}`);
+  log(`${m.algo === 'ed25519' ? 'ed25519 proof' : 'HMAC proof'}: ${
+    proofRes === null ? 'SKIPPED -- no key/pubkey available'
+    : proofRes ? 'OK -- sealed with your key' : 'FAIL -- not sealed by your key'}`);
   let changed = 0, missing = 0;
   for (const e of m.files) {
     if (!fs.existsSync(e.path)) { missing++; console.error(`  gone:    ${e.path}`); continue; }
     if (hashFile(e.path).hash !== e.sha256) { changed++; console.error(`  changed: ${e.path}`); }
   }
   log(`${m.fileCount} sealed, ${changed} changed, ${missing} gone since ${m.sealedAt}`);
-  if (!proofOk || digest !== m.digest) process.exit(1);
+  if (proofRes === false || digest !== m.digest || changed > 0) process.exit(1);
 }
 
 function cmdScan(args) {
@@ -1114,7 +1246,9 @@ jobs:
         with:
           node-version: '20'
       - name: Verify authorship watermarks are intact
-        run: node .authormark/authormark.mjs check --presence .
+        # ed25519 repos verify signatures here from the public key in
+        # .authormark.json; hmac repos fall back to a presence check (no secret in CI).
+        run: node .authormark/authormark.mjs check .
 `;
 
 const AGENT_RULE = `
@@ -1269,9 +1403,11 @@ const USAGE = `authormark -- layered authorship watermarking
        ONE COMMAND for a new repo: init + vendor + CI + agent rules + LICENSE
        + stamp + images + seal + pre-commit hook. Idempotent -- rerun anytime.
 
-  init [--author N] [--email E] [--github U] [--license L] [--reuse]
-       create .authormark.json + your secret HMAC key (~/.authormark.key)
-       --reuse also emits a REUSE-spec SPDX-FileCopyrightText line
+  init [--author N] [--email E] [--github U] [--license L] [--reuse] [--ed25519]
+       create .authormark.json + your secret key (~/.authormark.key)
+       --reuse   also emits a REUSE-spec SPDX-FileCopyrightText line
+       --ed25519 asymmetric mode: a Signature: line CI verifies from the public
+                 key in config -- no secret needed to check authenticity
 
   stamp <paths...> [--ext .ts,.tsx] [--zw] [--dry]
        insert/refresh the copyright header + keyed fingerprint in source files
