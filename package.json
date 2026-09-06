@@ -11,8 +11,7 @@
     "test": "node --test",
     "test:watch": "node --test --watch",
     "authormark": "node authormark.mjs",
-    "bot": "node bot.mjs",
-    "sync-vendor": "node scripts/sync-vendor.mjs"
+    "bot": "node bot.mjs"
   },
   "engines": {
     "node": ">=18"
@@ -22,7 +21,7 @@
     "bot.mjs",
     "watch.sh",
     "bot.config.json",
-    ".authormark/"
+    "action.yml"
   ],
   "keywords": [
     "watermark",

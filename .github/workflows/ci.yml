@@ -20,13 +20,11 @@ jobs:
       matrix:
         node: ['18', '20', '24']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4.1.0
         with:
           node-version: ${{ matrix.node }}
       - name: Unit tests
         run: node --test
-      - name: Vendored engine is in sync
-        run: node scripts/sync-vendor.mjs --check
       - name: Authorship watermarks are intact
-        run: node .authormark/authormark.mjs check --presence .
+        run: node authormark.mjs check --presence .
