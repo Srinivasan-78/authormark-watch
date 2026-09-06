@@ -18,6 +18,14 @@ Operates autonomously on a daily schedule via GitHub Actions, or manually via CL
 ### 1. 🔏 AuthorMark Code Watermarking & Signing
 - Scans every repository for intact `@authormark v1` headers, keyed HMAC fingerprints, invisible zero-width copy-paste marks, image watermarks, and sealed `AUTHORSHIP.json` manifests.
 - In **Fix Mode** (`--fix` / `FIX=1`), checks out an `authormark` branch, stamps unmarked or drifted files, commits as a bot, pushes, and opens/updates a clean Pull Request.
+- **Reusable GitHub Action (`action.yml`)**: Repositories can check authorship without vendoring the engine:
+  ```yaml
+  - uses: Srinivasan-78/authormark-watch@main
+    with:
+      mode: check-presence # or 'check', 'stamp', 'verify'
+      path: .
+      key: ${{ secrets.AUTHORMARK_KEY }} # optional HMAC signing key
+  ```
 
 ### 2. 🧹 Multi-Language Code Linting & Hygiene Scan
 - **Secret & Token Scanning**: Detects committed GitHub PATs/OAuth, Firebase/Google API keys and OAuth client secrets, AWS credentials, PEM private keys, Slack/Stripe/npm tokens, Slack/Discord webhooks, JWTs, and committed `.env` files — in the working tree **and in git history** (`git log -G` prefilter).
