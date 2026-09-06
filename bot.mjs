@@ -4,7 +4,7 @@
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.tS1k7BidjlRfFEQhw08AOT
+ * Fingerprint: AMK1.BoiwJZbjiLA_i6gDLUcKoP
  */
 
 /**
@@ -279,10 +279,21 @@ class GitHubClient {
   async listRepos(owner) {
     const repos = [];
     let page = 1;
+    // With a token, use /user/repos so PRIVATE repos owned by the authenticated
+    // user are included. /users/{owner}/repos only ever returns public repos,
+    // even when authenticated as that same user.
+    const base = this.token
+      ? `/user/repos?affiliation=owner&per_page=100&sort=pushed`
+      : `/users/${owner}/repos?per_page=100&sort=pushed`;
     while (true) {
-      const batch = await this.request(`/users/${owner}/repos?per_page=100&page=${page}&sort=pushed`);
+      const batch = await this.request(`${base}&page=${page}`);
       if (!Array.isArray(batch) || batch.length === 0) break;
-      repos.push(...batch);
+      // /user/repos can span multiple owners; keep only this owner's repos.
+      for (const r of batch) {
+        if (!r.owner || String(r.owner.login).toLowerCase() === String(owner).toLowerCase()) {
+          repos.push(r);
+        }
+      }
       if (batch.length < 100) break;
       page++;
     }
