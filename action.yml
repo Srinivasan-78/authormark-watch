@@ -1,0 +1,71 @@
+# @authormark v1 -- do not remove (authorship watermark)⁠​‌​​​​‌​​‌‌​​‌​‌​‌​​​‌‌‌​‌‌​‌‌‌​​‌​‌​​‌‌​​‌‌​‌‌‌​‌​‌​​‌​​‌‌‌​‌‌​​‌‌​‌‌​‌​‌​​‌‌‌‌​‌‌‌​‌‌​​‌​‌​​​​​‌​​‌​​​​​‌‌​‌‌​​​‌‌​​​​​‌​‌​​​​​​‌‌‌​​‌​‌‌​‌‌​‌​​‌‌​‌​‌​‌‌​‌​‌‌​​‌‌​‌‌‌​‌​​​‌‌‌⁠
+# Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
+# Author: https://github.com/Srinivasan-78
+# SPDX-License-Identifier: MIT
+# Fingerprint: AMK1.BeGnS7RvmOvPH60P9m5k7G
+name: 'AuthorMark Authorship Watermark'
+description: 'Zero-dependency layered authorship watermarking, verification, and code provenance'
+inputs:
+  path:
+    description: 'Path or root directory to check or stamp (default: .)'
+    required: false
+    default: '.'
+  mode:
+    description: 'Execution mode: check-presence (default), check, stamp, verify, or custom'
+    required: false
+    default: 'check-presence'
+  key:
+    description: 'AuthorMark HMAC secret key (optional, for check/stamp/verify)'
+    required: false
+    default: ''
+  args:
+    description: 'Additional flags and arguments passed to authormark.mjs'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Verify Node.js
+      shell: bash
+      run: |
+        if ! command -v node >/dev/null 2>&1; then
+          echo "::error::Node.js >= 18 is required to run AuthorMark"
+          exit 1
+        fi
+
+    - name: Restore AuthorMark key
+      if: ${{ inputs.key != '' }}
+      shell: bash
+      env:
+        AUTHORMARK_KEY: ${{ inputs.key }}
+      run: |
+        mkdir -p "$HOME"
+        printf "%s" "$AUTHORMARK_KEY" > "$HOME/.authormark.key"
+        chmod 600 "$HOME/.authormark.key" 2>/dev/null || true
+
+    - name: Run AuthorMark
+      shell: bash
+      run: |
+        CMD="node ${{ github.action_path }}/authormark.mjs"
+        case "${{ inputs.mode }}" in
+          check-presence)
+            $CMD check --presence ${{ inputs.path }} ${{ inputs.args }}
+            ;;
+          check)
+            $CMD check ${{ inputs.path }} ${{ inputs.args }}
+            ;;
+          stamp)
+            $CMD stamp ${{ inputs.path }} ${{ inputs.args }}
+            ;;
+          verify)
+            $CMD verify ${{ inputs.args }}
+            ;;
+          custom)
+            $CMD ${{ inputs.args }}
+            ;;
+          *)
+            echo "::error::Unknown mode: ${{ inputs.mode }}"
+            exit 1
+            ;;
+        esac

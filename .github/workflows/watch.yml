@@ -7,8 +7,8 @@ name: Master Bot Supervisor
 
 on:
   schedule:
-    # Daily at 06:17 UTC. Off-the-hour so it isn't queued behind everyone else's cron.
-    - cron: '17 6 * * *'
+    # Weekly on Monday at 06:17 UTC. Off-the-hour so it isn't queued behind everyone else's cron.
+    - cron: '17 6 * * 1'
   workflow_dispatch:
     inputs:
       fix:
@@ -32,7 +32,7 @@ on:
         type: string
         default: ''
 
-# A manual run and the nightly cron overlapping would open duplicate fix PRs or race tags.
+# A manual run and the weekly cron overlapping would open duplicate fix PRs or race tags.
 concurrency:
   group: authormark-master-bot
   cancel-in-progress: false
@@ -47,10 +47,10 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout Master Bot Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4.1.0
         with:
           node-version: '24'
 
