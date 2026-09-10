@@ -1,17 +1,23 @@
 {
   "schema": "authormark/manifest/1",
+  "algo": "hmac",
   "author": "Srinivasan Vijayaraghavan",
   "email": "srinivasan.shyam2000@gmail.com",
   "github": "https://github.com/Srinivasan-78",
-  "sealedAt": "2026-08-30T21:13:05.348Z",
-  "fileCount": 6,
-  "digest": "9784e57d8fb733684763d9c363a6b7be9b286e57c82c394a80832672b1626def",
-  "proof": "ac1c9d63b52c1ee3321f7b62442d2794b4fa67f9fba3df9cc8a955ce5bc17d3b",
+  "sealedAt": "2026-09-10T13:44:56.251Z",
+  "fileCount": 12,
+  "digest": "da2d222053c54906221631a637533a4cc0362750c68d06f1a9ad998018893dd2",
+  "proof": "194af3215f575b82e0448ab687953eea0d8ec2a72c6350b5a0d6e01d785b3301",
   "files": [
     {
-      "path": ".github/workflows/watch.yml",
-      "sha256": "fe1bfa9b1b26cabcb91fce7ab8a187d9d450a2e0b8bb5e7bc71d24145fb311a0",
-      "bytes": 1883
+      "path": ".github\\workflows\\ci.yml",
+      "sha256": "9f1f58ab38682b54ea716187ad521102a27a390c666bda1247a354cc24c2593e",
+      "bytes": 833
+    },
+    {
+      "path": ".github\\workflows\\watch.yml",
+      "sha256": "a2675307ef7bd9b0837e15ca2a76ff4a0d704496b5ee54f43005110a1aca1edc",
+      "bytes": 2906
     },
     {
       "path": "AGENTS.md",
@@ -25,18 +31,43 @@
     },
     {
       "path": "README.md",
-      "sha256": "1c7d31324a43ece1dedfc544b0246d5aa518dcb1aea69aec54747e14443e78fc",
-      "bytes": 7209
+      "sha256": "1ac83a4a3b869167bbc71dd21868b72fcf1248cbd613701be868d7f53f70b798",
+      "bytes": 11637
+    },
+    {
+      "path": "action.yml",
+      "sha256": "7dde7c7fa1d0aca1008e3311e0754b7dfaeded86e2fe3518379b0fcea3f705b9",
+      "bytes": 1786
     },
     {
       "path": "authormark.mjs",
-      "sha256": "cbc8ce22ff8726b4f84de869efd91b51a965f0ad4045ac297ad0f6ef80a13721",
-      "bytes": 47349
+      "sha256": "f73e24944f40f34e1a9c1ab153facaded52c15a935ddf75602650c3e19d0365d",
+      "bytes": 86877
+    },
+    {
+      "path": "bot.mjs",
+      "sha256": "d3a95d216329b520c6b5474034f7680d055d650122fd9f17c401eb9049430edd",
+      "bytes": 83943
+    },
+    {
+      "path": "test\\authormark.test.mjs",
+      "sha256": "4e5ba37f17f493cd0b847e959b34c8108338a1858382c847a59a7393020622f0",
+      "bytes": 11053
+    },
+    {
+      "path": "test\\bot.test.mjs",
+      "sha256": "e8b1ea33b530f5db6217d151cff156f6a7f44f0e62c1e3303ec16f9325dd1e13",
+      "bytes": 13967
+    },
+    {
+      "path": "test\\cli.integration.test.mjs",
+      "sha256": "dabac1754e0f37848dceb8a7a824c2fc1117a732a5b7319512a40118cc592c3d",
+      "bytes": 6100
     },
     {
       "path": "watch.sh",
-      "sha256": "c7e09213a95aea88362c725b847509885e8fd62385b469bed8575482b84cd0cc",
-      "bytes": 12673
+      "sha256": "b0a5c9ff0da090a33af2ec0c615050af396d29227616181505783ea093e7ab85",
+      "bytes": 888
     }
   ]
 }
