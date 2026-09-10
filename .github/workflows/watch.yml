@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.zzYpueq0qwENuefBcq7RwJ
+# Fingerprint: AMK1.G5Z-fYigir0TxA40EUyNXZ
 name: Master Bot Supervisor
 
 on:
@@ -25,6 +25,10 @@ on:
         default: true
       lint:
         description: 'Run multi-language code linting and hygiene scan'
+        type: boolean
+        default: true
+      provenance:
+        description: 'Scaffold REUSE headers + provenance workflow, harden workflows, and (with fix) require signed commits'
         type: boolean
         default: true
       target_repo:
@@ -70,6 +74,7 @@ jobs:
           FLAGS=(--all --fix)
           [ "${{ inputs.fix || 'true' }}" = "false" ] && FLAGS=(--all)
           [ "${{ inputs.lint || 'true' }}" = "true" ] && FLAGS+=(--lint)
+          [ "${{ inputs.provenance || 'true' }}" = "true" ] && FLAGS+=(--provenance)
           [ "${{ inputs.tag_prs || 'true' }}" = "true" ] && FLAGS+=(--tag-prs)
           [ "${{ inputs.tag_issues || 'true' }}" = "true" ] && FLAGS+=(--tag-issues)
           [ -n "${{ inputs.target_repo }}" ] && FLAGS+=(--repo "${{ inputs.target_repo }}")

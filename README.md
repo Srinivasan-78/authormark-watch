@@ -3,7 +3,7 @@
   Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
   Author: https://github.com/Srinivasan-78
   SPDX-License-Identifier: MIT
-  Fingerprint: AMK1.AMIvOkGddvUkwHUm8CXnDd
+  Fingerprint: AMK1.HhLLPo5z-169sBBm-MJ30u
 -->
 # authormark-watch (Master Bot & Repository Supervisor)
 
@@ -35,7 +35,15 @@ Operates autonomously on a daily schedule via GitHub Actions, or manually via CL
 - **Hygiene & Cache Protection**: Detects and flags tracked `.pyc`, `__pycache__`, OS metadata (`.DS_Store`, `Thumbs.db`), and uncommitted build artifacts.
 - **Repository Health Standards**: Verifies `LICENSE`, `README.md`, `.gitignore`, `AGENTS.md` / `CLAUDE.md`, `SECURITY.md`, `CONTRIBUTING.md`, `.github/dependabot.yml`, and `package.json` ↔ `LICENSE` licence agreement. Fix Mode scaffolds the missing ones.
 
-### 3. 🏷️ Automated PR Tagging & Labeling
+### 3. 🔐 REUSE Headers, Signed Commits & Build Provenance
+- **REUSE / SPDX**: scaffolds a `REUSE.toml` (aggregate `SPDX-FileCopyrightText` + `SPDX-License-Identifier`) and `LICENSES/MIT.txt`, and adds a `.github/workflows/provenance.yml` that runs `reuse lint` on every PR.
+- **Fixes the "fails on every PR" authorship gate**: rewrites any `pull_request`-triggered `authormark` gate from a full fingerprint check (which is stale on every edited file until re-stamped) to a **presence check**; full verification still runs on push to the default branch.
+- **Workflow hardening**: adds a least-privilege top-level `permissions:` block to workflows that lack one, and pins every action to a commit SHA — the two findings the lint scan used to only *report*.
+- **Signed-commit enforcement** (`--provenance --fix`): sets branch protection on the default branch to **require signed commits** plus the `reuse` (and, for AuthorMark repos, `verify-authorship`) status check. Needs `Administration: Read and Write` on the PAT — without it the exact `gh api` commands are printed in the dashboard instead.
+- **Build provenance attestation**: repos that publish an npm package get an `actions/attest-build-provenance` job wired to `npm pack` on release; repos with another release pipeline get a pointer to add it.
+- CLI: `--provenance` (in `--all`); env `PROVENANCE=1`; per-repo opt-out via `.masterbot.json` `features.provenance`.
+
+### 4. 🏷️ Automated PR Tagging & Labeling
 - Analyzes all open pull requests across all monitored repositories.
 - Automatically calculates and applies:
   - **Size Tags**: `size/XS` (<10 lines), `size/S` (10-49), `size/M` (50-249), `size/L` (250-999), `size/XL` (1000+).
@@ -44,19 +52,19 @@ Operates autonomously on a daily schedule via GitHub Actions, or manually via CL
   - **Workflow Tags**: `needs-review`, `automated-pr`, `bot`, `work-in-progress`.
 - Automatically provisions missing labels on repositories with standard color palettes and descriptions.
 
-### 4. 📋 Automated Issue Tagging & Triage
+### 5. 📋 Automated Issue Tagging & Triage
 - Analyzes all open issues across repositories for keywords, scope, and urgency.
 - Automatically assigns:
   - **Category Tags**: `bug`, `enhancement`, `documentation`, `question`, `security`, `performance`.
   - **Priority & Triage**: `triage`, `needs-info`, `good first issue`, `priority/high`, `priority/medium`, `priority/low`.
 - Ensures issue labels exist with proper colors.
 
-### 5. 📊 Consolidated Master Dashboard
+### 6. 📊 Consolidated Master Dashboard
 - Posts and maintains a single, non-spamming tracking issue on `authormark-watch` (`authormark: Master Bot Status Dashboard`), closing automatically once all repositories are clean.
 - Also appends the report to the **GitHub Actions job summary** (`$GITHUB_STEP_SUMMARY`) and, when `SLACK_WEBHOOK` / `DISCORD_WEBHOOK` (or `config.notify`) is set, posts a one-line status on findings.
 
-### 6. ⚙️ Per-repo overrides
-- A supervised repo may ship a `.masterbot.json` to set `{ "enabled": false }` or tune `features.{authormark,lint}.autoFix` for itself only.
+### 7. ⚙️ Per-repo overrides
+- A supervised repo may ship a `.masterbot.json` to set `{ "enabled": false }` or tune `features.{authormark,lint,provenance}.autoFix` for itself only.
 
 ---
 
@@ -82,6 +90,7 @@ Configure repository rules, features, and labeling in `bot.config.json`:
   "features": {
     "authormark": { "enabled": true, "autoFix": false, "branch": "authormark" },
     "lint": { "enabled": true, "scanSecrets": true, "scanHygiene": true, "scanRepoHealth": true },
+    "provenance": { "enabled": true, "autoFix": true, "branch": "masterbot-provenance", "reuse": true, "signedCommits": true, "attestation": true, "hardenWorkflows": true },
     "prTagger": { "enabled": true, "sizeLabels": true, "typeLabels": true, "langLabels": true, "autoCreateLabels": true },
     "issueTagger": { "enabled": true, "categoryLabels": true, "priorityLabels": true, "triageLabel": true, "autoCreateLabels": true }
   }
@@ -101,7 +110,8 @@ The workflow requires a token with permissions to supervise your repositories.
      - **Contents**: Read and Write (for creating AuthorMark fix branches & PRs)
      - **Pull requests**: Read and Write (for creating PRs and applying PR labels)
      - **Issues**: Read and Write (for triaging issues and updating the dashboard)
-     - **Workflows**: Read and Write (for stamping workflow files under `.github/workflows/`)
+     - **Workflows**: Read and Write (for stamping / hardening files under `.github/workflows/`)
+     - **Administration**: Read and Write (for the `--provenance` signed-commit branch protection; omit it and the bot prints the `gh api` commands to run by hand)
      - **Metadata**: Read-only
 
 2. Add it as a secret named `BOT_TOKEN` (or `WATCH_TOKEN`):
@@ -119,6 +129,26 @@ The workflow requires a token with permissions to supervise your repositories.
    gh workflow run watch.yml --repo Srinivasan-78/authormark-watch
    gh workflow run watch.yml --repo Srinivasan-78/authormark-watch -f fix=true
    ```
+
+### One-time commit-signing setup (per machine + account)
+
+The `--provenance` branch protection **requires signed commits**. Set signing up first, or
+your own pushes to `main` will be rejected across every repo.
+
+```sh
+# 1. A signing key (reuse an existing SSH key if you have one)
+ssh-keygen -t ed25519 -C "git signing" -f ~/.ssh/id_ed25519_sign
+
+# 2. Tell git to sign every commit and tag with it
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519_sign.pub
+git config --global commit.gpgsign true
+git config --global tag.gpgsign true
+```
+
+Then add `~/.ssh/id_ed25519_sign.pub` to GitHub as a **Signing key** (not an auth key) at
+<https://github.com/settings/ssh/new>, and enable **Vigilant mode** under
+*Settings → SSH and GPG keys → "Flag unsigned commits as unverified"*.
 
 ---
 
@@ -144,9 +174,17 @@ node bot.mjs --lint
 node bot.mjs --tag-prs
 node bot.mjs --tag-issues
 
+# Provenance: preview, then open the REUSE / hardening PR + require signed commits
+node bot.mjs --provenance --dry-run
+node bot.mjs --provenance --fix
+
+# Initialise a brand-new repo (watermarks + REUSE + provenance + signing gate)
+node bot.mjs --repo my-new-repo --provenance --fix
+
 # Or use the bash wrapper
 ./watch.sh
 FIX=1 ./watch.sh
+FIX=1 ./watch.sh --provenance
 ```
 
 ---
@@ -238,11 +276,9 @@ A `.authormarkignore` file (gitignore-style, one pattern per line) is merged int
 ## Development
 
 ```sh
-npm test                      # node:test unit suite (authormark + bot classifiers)
-node scripts/sync-vendor.mjs  # copy authormark.mjs -> .authormark/authormark.mjs
-node scripts/sync-vendor.mjs --check   # CI guard: fail if the two have drifted
+npm test        # node:test unit suite (authormark engine + bot classifiers/builders)
 ```
 
-`.github/workflows/ci.yml` runs the suite on Node 18/20/24, checks vendored-engine
-parity, and runs `authormark check --presence` on every push and PR.
+`.github/workflows/ci.yml` runs the suite on Node 18/20/24 and runs
+`authormark check --presence` on every push and PR.
 `.github/workflows/watch.yml` is the scheduled account-wide supervisor.
