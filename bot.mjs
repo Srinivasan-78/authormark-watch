@@ -4,7 +4,7 @@
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.BoiwJZbjiLA_i6gDLUcKoP
+ * Fingerprint: AMK1.eHwqh0oTLekrtONkwZH0jR
  */
 
 /**
@@ -49,6 +49,10 @@ function loadConfig() {
     features: {
       authormark: { enabled: true, autoFix: false, branch: 'authormark' },
       lint: { enabled: true, scanSecrets: true, scanHygiene: true, scanRepoHealth: true, autoFix: false },
+      provenance: {
+        enabled: true, autoFix: true, branch: 'masterbot-provenance',
+        reuse: true, signedCommits: true, attestation: true, hardenWorkflows: true,
+      },
       prTagger: { enabled: true, sizeLabels: true, typeLabels: true, langLabels: true, statusLabels: true, autoCreateLabels: true },
       issueTagger: { enabled: true, categoryLabels: true, priorityLabels: true, triageLabel: true, autoCreateLabels: true },
     },
@@ -95,6 +99,7 @@ function applyRepoOverrides(config, repoDir) {
       features: {
         authormark: { ...config.features.authormark, ...(o.features?.authormark || {}) },
         lint: { ...config.features.lint, ...(o.features?.lint || {}) },
+        provenance: { ...config.features.provenance, ...(o.features?.provenance || {}) },
         prTagger: { ...config.features.prTagger, ...(o.features?.prTagger || {}) },
         issueTagger: { ...config.features.issueTagger, ...(o.features?.issueTagger || {}) },
       },
@@ -169,6 +174,7 @@ async function notify(config, summary, hasIssues, isDryRun) {
   const parts = [];
   if (am.drifted.length + am.unmarked.length) parts.push(`${am.drifted.length + am.unmarked.length} watermark`);
   if (summary.lintFindings.length) parts.push(`${summary.lintFindings.length} hygiene`);
+  if (summary.provenance && summary.provenance.governanceSkipped.length) parts.push(`${summary.provenance.governanceSkipped.length} unprotected`);
   if (summary.securityAlerts.length) parts.push(`${summary.securityAlerts.length} security`);
   if (summary.failedRepos.length) parts.push(`${summary.failedRepos.length} unreachable`);
   const text = `*Master Bot* (@${config.owner}) — ${parts.join(', ')} finding(s) across ${summary.total} repos. ` +
@@ -882,6 +888,342 @@ jobs:
           GH_TOKEN: "\${{ secrets.GITHUB_TOKEN }}"
 `;
 
+// ---------------------------------------------------------------- Provenance, Signing & Workflow Hardening
+
+// Canonical SPDX MIT licence text (with placeholders), written to LICENSES/MIT.txt
+// so `reuse lint` can resolve the SPDX-License-Identifier the REUSE.toml declares.
+// The filled-in root LICENSE stays as-is; this is the machine-readable copy.
+const MIT_LICENSE_SPDX = `MIT License
+
+Copyright (c) <year> <copyright holders>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+`;
+
+// SHAs lifted from this repo's own hand-pinned workflows (watch.yml / ci.yml) --
+// trusted, and kept in sync there. Anything not listed here is emitted as a tag
+// ref and pinned by pinActionsOnDisk() in the same scaffold pass.
+const PROV_ACTION_PINS = {
+  'actions/checkout': { sha: '11d5960a326750d5838078e36cf38b85af677262', ref: 'v4.2.2' },
+  'actions/setup-node': { sha: '39370e3970a6d050c480ffad4ff0ed4d3fdee5af', ref: 'v4.1.0' },
+};
+
+// REUSE.toml (REUSE spec 3.x): one aggregate annotation covering the whole tree.
+// `precedence = "aggregate"` means a file's own SPDX header still wins where present.
+function buildReuseToml(config) {
+  const id = (config && config.botIdentity) || {};
+  const holder = id.authorEmail ? `${id.author} <${id.authorEmail}>` : (id.author || 'the repository owner');
+  const year = new Date().getFullYear();
+  return `version = 1
+
+# Managed by authormark-watch Master Bot. A per-file SPDX header, where one
+# exists, takes precedence over this aggregate annotation.
+[[annotations]]
+path = "**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "${year} ${holder}"
+SPDX-License-Identifier = "MIT"
+`;
+}
+
+// Does this repo publish a release artifact? 'npm' -> we can wire a concrete
+// attestation job; 'other' -> mention it in the PR body but don't emit a job we
+// cannot target; null -> REUSE + signing only.
+function detectPublish(repoDir) {
+  try {
+    const pkgPath = path.join(repoDir, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      const s = pkg.scripts || {};
+      if (s.publish || s.release || s.prepublishOnly || pkg.publishConfig) return 'npm';
+    }
+  } catch {}
+  try {
+    const wfDir = path.join(repoDir, '.github', 'workflows');
+    if (fs.existsSync(wfDir) && fs.readdirSync(wfDir).some(f => /release|publish|deploy/i.test(f))) return 'other';
+  } catch {}
+  if (fs.existsSync(path.join(repoDir, 'Dockerfile'))) return 'other';
+  return null;
+}
+
+// `.github/workflows/provenance.yml`: REUSE lint on every PR; full authorship
+// verification only on push (never blocks a PR on a legitimately-stale
+// fingerprint); build-provenance attestation for npm releases.
+function buildProvenanceWorkflow({ hasAuthormark = false, publishKind = null, pins = {} } = {}) {
+  const pin = (action, fallbackRef) => {
+    const p = pins[action] || PROV_ACTION_PINS[action];
+    return p && p.sha ? `${action}@${p.sha}  # ${p.ref || fallbackRef}` : `${action}@${fallbackRef}`;
+  };
+  const checkout = pin('actions/checkout', 'v4');
+  const setupNode = pin('actions/setup-node', 'v4');
+
+  let y = `name: provenance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+`;
+  if (publishKind === 'npm') y += `  release:\n    types: [published]\n`;
+  y += `
+permissions:
+  contents: read
+
+jobs:
+  reuse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ${checkout}
+      - name: REUSE / SPDX compliance
+        run: pipx run reuse lint
+`;
+  if (hasAuthormark) {
+    y += `
+  verify-authorship:
+    # Full fingerprint / signature verification. Runs only on push to a
+    # protected branch -- never on pull_request, where an edited file's
+    # fingerprint is legitimately stale until it is re-stamped. Without
+    # AUTHORMARK_KEY this degrades to a presence check (ed25519 repos still
+    # verify signatures from the public key in .authormark.json).
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ${checkout}
+      - uses: Srinivasan-78/authormark-watch@main
+        with:
+          mode: check
+          path: .
+          key: \${{ secrets.AUTHORMARK_KEY }}
+`;
+  }
+  if (publishKind === 'npm') {
+    y += `
+  attest:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: ${checkout}
+      - uses: ${setupNode}
+        with:
+          node-version: '20'
+      - run: npm ci --ignore-scripts
+      - run: npm pack
+      - name: Attest build provenance for the packed tarball
+        uses: ${pin('actions/attest-build-provenance', 'v2')}
+        with:
+          subject-path: '*.tgz'
+`;
+  }
+  return y;
+}
+
+// A full `authormark check` (or `verify`) as a pull_request gate rejects every PR
+// that edits a stamped file -- the fingerprint/signature is meant to go stale on
+// edit and only `stamp` refreshes it. Downgrade PR-triggered gates to a presence
+// check; leave push-only jobs (which SHOULD verify fully) untouched.
+// Pure: returns { text, changed }.
+function retargetAuthormarkPrGate(text) {
+  if (!/pull_request/.test(text) || !/authormark/i.test(text)) return { text, changed: false };
+  let out = text;
+  // Composite action (`uses: .../authormark-watch`): mode check/verify -> presence.
+  out = out.replace(/(\bmode:\s*["']?)(check|verify)(?![-\w])(["']?[^\S\n]*(?:#.*)?)$/gm,
+    (_m, pre, _mode, post) => `${pre}check-presence${post}`);
+  // A bare `authormark check <path>` CLI invocation is only safe to blanket-
+  // downgrade when the workflow runs on pull_request alone -- otherwise the push
+  // build, which SHOULD verify fully, would lose its check too.
+  const prOnly = !/^\s*push\s*:/m.test(text);
+  if (prOnly) {
+    out = out.replace(/(authormark(?:\.mjs)?["']?\s+check)(\s+)(?!--presence\b|-)/g, '$1 --presence$2');
+  }
+  return { text: out, changed: out !== text };
+}
+
+// Insert a least-privilege top-level `permissions:` block into a workflow that
+// has none, so its jobs don't inherit the broad default GITHUB_TOKEN.
+// Pure: returns { text, changed }.
+function addWorkflowPermissions(text) {
+  if (/^\s*permissions\s*:/m.test(text)) return { text, changed: false };
+  if (!/^jobs\s*:/m.test(text)) return { text, changed: false };
+  const out = text.replace(/^jobs\s*:/m, 'permissions:\n  contents: read\n\njobs:');
+  return { text: out, changed: out !== text };
+}
+
+// Harden every workflow file on disk: add missing `permissions:` blocks and
+// retarget PR-triggered authormark gates. Returns a list of human-readable
+// changes. (SHA-pinning is done separately by pinActionsOnDisk.)
+function hardenWorkflowsOnDisk(repoDir, skip = []) {
+  const dir = path.join(repoDir, '.github', 'workflows');
+  const changes = [];
+  if (!fs.existsSync(dir)) return changes;
+  const skipSet = new Set(skip);
+  for (const f of fs.readdirSync(dir)) {
+    if (!/\.ya?ml$/.test(f) || skipSet.has(f)) continue;
+    const p = path.join(dir, f);
+    let t;
+    try { t = fs.readFileSync(p, 'utf8'); } catch { continue; }
+    let next = t;
+    const gate = retargetAuthormarkPrGate(next);
+    if (gate.changed) { next = gate.text; changes.push(`Downgraded the PR-triggered authormark gate to a presence check in \`.github/workflows/${f}\``); }
+    const perms = addWorkflowPermissions(next);
+    if (perms.changed) { next = perms.text; changes.push(`Added least-privilege \`permissions:\` to \`.github/workflows/${f}\``); }
+    if (next !== t) fs.writeFileSync(p, next);
+  }
+  return changes;
+}
+
+// Scaffold the provenance stack into a checked-out repo and push a bot branch.
+// Mirrors fixLintRepository: write files if absent, commit as the bot, force-push.
+async function scaffoldProvenance(client, repoDir, repoName, config, branch) {
+  const owner = config.owner;
+  const botName = config.botIdentity.name;
+  const botEmail = config.botIdentity.email;
+  const token = resolveToken();
+  const changes = [];
+  const createdFiles = [];
+
+  try {
+    try { execSync('git fetch --unshallow origin', { cwd: repoDir, stdio: 'ignore' }); } catch {}
+    execSync(`git checkout -B "${branch}"`, { cwd: repoDir, stdio: 'ignore' });
+
+    // 1. REUSE files
+    if (!fs.existsSync(path.join(repoDir, 'REUSE.toml')) && !fs.existsSync(path.join(repoDir, '.reuse', 'dep5'))) {
+      fs.writeFileSync(path.join(repoDir, 'REUSE.toml'), buildReuseToml(config));
+      createdFiles.push('REUSE.toml');
+      changes.push('Added `REUSE.toml` (SPDX copyright + licence for the whole tree)');
+    }
+    const licensesDir = path.join(repoDir, 'LICENSES');
+    if (!fs.existsSync(path.join(licensesDir, 'MIT.txt'))) {
+      fs.mkdirSync(licensesDir, { recursive: true });
+      fs.writeFileSync(path.join(licensesDir, 'MIT.txt'), MIT_LICENSE_SPDX);
+      createdFiles.push('LICENSES/MIT.txt');
+      changes.push('Added `LICENSES/MIT.txt` for REUSE compliance');
+    }
+
+    // 2. Harden pre-existing workflows: permissions + PR-gate retarget. Done
+    // BEFORE writing provenance.yml so the retarget heuristic never rewrites the
+    // file we generate (its push-only verify-authorship job must stay a full check).
+    for (const c of hardenWorkflowsOnDisk(repoDir, ['provenance.yml'])) changes.push(c);
+
+    // 3. provenance.yml
+    const wfDir = path.join(repoDir, '.github', 'workflows');
+    const provPath = path.join(wfDir, 'provenance.yml');
+    const publishKind = detectPublish(repoDir);
+    if (!fs.existsSync(provPath)) {
+      fs.mkdirSync(wfDir, { recursive: true });
+      fs.writeFileSync(provPath, buildProvenanceWorkflow({
+        hasAuthormark: fs.existsSync(path.join(repoDir, '.authormark.json')),
+        publishKind,
+      }));
+      createdFiles.push('.github/workflows/provenance.yml');
+      changes.push(`Added \`.github/workflows/provenance.yml\` (REUSE lint on PRs${publishKind === 'npm' ? ', build-provenance attestation on release' : ''})`);
+    }
+
+    // 4. Pin every unpinned action to a SHA (covers provenance.yml too).
+    try {
+      const pinned = await pinActionsOnDisk(repoDir, client);
+      if (pinned) changes.push(`Pinned ${pinned} GitHub Actions reference(s) to a commit SHA`);
+    } catch (e) {
+      changes.push(`WARNING: could not pin all actions (${sanitize(e.message)})`);
+    }
+
+    // 5. Stamp scaffolded files that carry code, if the repo uses AuthorMark.
+    if (createdFiles.length && fs.existsSync(path.join(repoDir, '.authormark.json'))) {
+      const stampable = createdFiles.filter(f => /\.(mjs|js|cjs|ts|sh|yml|yaml)$/.test(f) && fs.existsSync(path.join(repoDir, f)));
+      if (stampable.length) {
+        try { execFileSync(process.execPath, [AM_SCRIPT, 'stamp', ...stampable], { cwd: repoDir, stdio: 'ignore' }); }
+        catch (e) { changes.push(`WARNING: could not stamp scaffolded files (${sanitize(e.message)})`); }
+      }
+    }
+
+    const status = execSync('git status --porcelain', { cwd: repoDir, encoding: 'utf8' }).trim();
+    if (!status) return { success: true, changes: [], message: 'Already compliant', publishKind };
+
+    execSync('git add -A', { cwd: repoDir, stdio: 'ignore' });
+    const commitMsg = `chore: REUSE headers, provenance workflow & workflow hardening\n\n${changes.map(c => `- ${c}`).join('\n')}`;
+    execSync(`git -c "user.name=${botName}" -c "user.email=${botEmail}" commit -m "${commitMsg}"`, { cwd: repoDir, stdio: 'ignore' });
+
+    const pushRemote = token
+      ? `https://x-access-token:${token}@github.com/${owner}/${repoName}.git`
+      : 'origin';
+    execSync(`git push -u "${pushRemote}" "${branch}" --force`, { cwd: repoDir, stdio: 'ignore' });
+
+    return { success: true, branch, changes, message: `Pushed provenance scaffold to ${branch}`, publishKind };
+  } catch (err) {
+    return { success: false, error: sanitize(err.message) };
+  }
+}
+
+// Require signed commits + the provenance checks on the default branch.
+// Idempotent (GET before write). Needs `Administration: write` on the PAT --
+// a 403/404 is reported for manual follow-up, never fatal.
+async function applyRepoGovernance(client, owner, repo, branch, { hasAuthormark } = {}) {
+  const contexts = ['reuse'];
+  if (hasAuthormark) contexts.push('verify-authorship');
+  const protPath = `/repos/${owner}/${repo}/branches/${branch}/protection`;
+  const manual =
+    `gh api -X PUT ${protPath} -F 'required_status_checks[strict]=true' ` +
+    contexts.map(c => `-f 'required_status_checks[contexts][]=${c}'`).join(' ') +
+    ` -F enforce_admins=false -F 'required_pull_request_reviews=' -F 'restrictions=' && ` +
+    `gh api -X POST ${protPath}/required_signatures`;
+
+  try {
+    let current = null;
+    try { current = await client.request(protPath); }
+    catch (e) { if (!/\((404|403)\)/.test(e.message)) throw e; if (/\(403\)/.test(e.message)) return { applied: false, reason: sanitize(e.message), manual }; }
+
+    const curContexts = current?.required_status_checks?.contexts
+      || current?.required_status_checks?.checks?.map(c => c.context)
+      || [];
+    const protectionDrift = !current
+      || current.required_status_checks?.strict !== true
+      || contexts.some(c => !curContexts.includes(c));
+
+    if (protectionDrift) {
+      await client.request(protPath, {
+        method: 'PUT',
+        body: JSON.stringify({
+          required_status_checks: { strict: true, contexts },
+          enforce_admins: false,
+          required_pull_request_reviews: null,
+          restrictions: null,
+          allow_force_pushes: false,
+          allow_deletions: false,
+        }),
+      });
+    }
+    if (current?.required_signatures?.enabled !== true) {
+      await client.request(`${protPath}/required_signatures`, {
+        method: 'POST',
+        headers: { Accept: 'application/vnd.github+json' },
+      });
+    }
+    return { applied: true, changed: protectionDrift || current?.required_signatures?.enabled !== true };
+  } catch (e) {
+    if (/\((403|404)\)/.test(e.message)) return { applied: false, reason: sanitize(e.message), manual };
+    throw e;
+  }
+}
+
 function fixLintRepository(repoDir, repoName, config, token, branch = 'masterbot-hygiene') {
   const owner = config.owner;
   const botName = config.botIdentity.name;
@@ -1350,9 +1692,13 @@ Usage:
   node bot.mjs [options]
 
 Options:
-  --all            Run all checks (AuthorMark, Lint, PR Tagging, Issue Tagging)
+  --all            Run all checks (AuthorMark, Lint, Provenance, PR Tagging, Issue Tagging)
   --fix            Automatically fix AuthorMark & hygiene issues and open PRs
   --lint           Run multi-language code linting & hygiene checks
+  --provenance     Scaffold REUSE headers + provenance workflow, harden workflows,
+                   and (with --fix) require signed commits on the default branch
+  --no-protect     With --provenance --fix, open the PRs but skip branch protection
+                   (use until commit signing is set up account-wide)
   --tag-prs        Run automated PR tagging & labeling across repos
   --tag-issues     Run automated issue tagging & triage across repos
   --repo <name>    Target a single repository (e.g. --repo my-repo)
@@ -1364,12 +1710,13 @@ Environment Variables:
   ISSUE_TOKEN                                       - Token for updating status dashboard in this repo
   AUTHORMARK_KEY                                    - HMAC key for AuthorMark stamping
   FIX=1                                             - Equivalent to --fix
+  PROVENANCE=1                                      - Equivalent to --provenance
   REPORT=0                                          - Skip updating the GitHub issue dashboard
   SLACK_WEBHOOK / DISCORD_WEBHOOK                   - Post a summary line when findings need attention
   GITHUB_STEP_SUMMARY                               - (set by Actions) report is appended to the run summary
 
 Per-repo override: a repo may ship .masterbot.json to set { "enabled": false }
-or tune features.{authormark,lint}.autoFix for itself.
+or tune features.{authormark,lint,provenance}.autoFix for itself.
 `);
     process.exit(0);
   }
@@ -1390,8 +1737,9 @@ or tune features.{authormark,lint}.autoFix for itself.
   const isDryRun = args.includes('--dry-run');
   const targetRepoArg = args.includes('--repo') ? args[args.indexOf('--repo') + 1] : null;
 
-  const runAll = args.includes('--all') || (!args.includes('--lint') && !args.includes('--tag-prs') && !args.includes('--tag-issues'));
+  const runAll = args.includes('--all') || (!args.includes('--lint') && !args.includes('--provenance') && !args.includes('--tag-prs') && !args.includes('--tag-issues'));
   const doLint = runAll || args.includes('--lint');
+  const doProvenance = runAll || args.includes('--provenance') || process.env.PROVENANCE === '1';
   const doPrTag = runAll || args.includes('--tag-prs');
   const doIssueTag = runAll || args.includes('--tag-issues');
 
@@ -1462,6 +1810,7 @@ or tune features.{authormark,lint}.autoFix for itself.
     lintFindings: [],
     lintFixed: [],
     lintFixFailed: [],
+    provenance: { scaffolded: [], scaffoldFailed: [], governanceApplied: [], governanceSkipped: [] },
     awaitingMerge: [],
     securityAlerts: [],
     prsTagged: [],
@@ -1506,7 +1855,7 @@ or tune features.{authormark,lint}.autoFix for itself.
       repoCfg.features.authormark.enabled !== false;
 
     // A. AuthorMark Check
-    log(`  [1/4] Checking AuthorMark watermarks & signatures...`);
+    log(`  [1/5] Checking AuthorMark watermarks & signatures...`);
     const amResult = checkAuthorMark(repoDir);
     let fixPrUrl = null;
 
@@ -1560,7 +1909,7 @@ or tune features.{authormark,lint}.autoFix for itself.
     // B. Multi-Language Code Lint & Hygiene
     let lintRes = null;
     if (doLint) {
-      log(`  [2/4] Running multi-language linter & hygiene scan...`);
+      log(`  [2/5] Running multi-language linter & hygiene scan...`);
       lintRes = lintRepository(repoDir, name);
       const issueCount =
         lintRes.secrets.length +
@@ -1643,9 +1992,78 @@ or tune features.{authormark,lint}.autoFix for itself.
       }
     }
 
+    // B3. Provenance, signing & workflow hardening
+    if (doProvenance && repoCfg.features.provenance?.enabled !== false) {
+      log(`  [3/5] Scaffolding REUSE / provenance & hardening workflows...`);
+      const provBranch = repoCfg.features.provenance?.branch || config.features.provenance.branch || 'masterbot-provenance';
+      const provFix = isFix && repoCfg.features.provenance?.autoFix !== false;
+      const hasAuthormark = fs.existsSync(path.join(repoDir, '.authormark.json'));
+
+      if (isDryRun || !provFix) {
+        const publishKind = detectPublish(repoDir);
+        const need = [];
+        if (!fs.existsSync(path.join(repoDir, 'REUSE.toml'))) need.push('REUSE.toml');
+        if (!fs.existsSync(path.join(repoDir, 'LICENSES', 'MIT.txt'))) need.push('LICENSES/MIT.txt');
+        if (!fs.existsSync(path.join(repoDir, '.github', 'workflows', 'provenance.yml'))) need.push('.github/workflows/provenance.yml');
+        log(need.length
+          ? `    ℹ️ Would scaffold: ${need.join(', ')}${publishKind === 'npm' ? ' (+ attestation job)' : ''}. Run with --fix to open the PR.`
+          : `    ✅ Provenance files already present.`);
+      } else if (token) {
+        const provResult = await scaffoldProvenance(client, repoDir, name, config, provBranch);
+        if (!provResult.success) {
+          errLog(`    ❌ Provenance scaffold failed: ${provResult.error}`);
+          summary.provenance.scaffoldFailed.push({ name, reason: provResult.error });
+        } else {
+          if (provResult.changes.length) {
+            log(`    ✅ ${provResult.message} (${provResult.changes.length} change(s))`);
+            try {
+              const res = await ensureFixPr(client, config.owner, name, provBranch, {
+                title: 'chore: REUSE headers, provenance workflow & signed-commit gate',
+                head: provBranch,
+                base: repoInfo.default_branch || 'main',
+                body: `Opened automatically by Master Bot ([authormark-watch](https://github.com/Srinivasan-78/authormark-watch)).\n\n${provResult.changes.map(c => `- ${c}`).join('\n')}\n\n` +
+                  `After merge, the default branch requires signed commits and the \`reuse\` check.` +
+                  (provResult.publishKind === 'other'
+                    ? `\n\n> This repo has a release/deploy pipeline — add \`actions/attest-build-provenance\` to it for SLSA build provenance.`
+                    : ''),
+              });
+              summary.provenance.scaffolded.push({ name, prUrl: res.url, action: res.action, changes: provResult.changes });
+              if (res.awaiting) {
+                summary.awaitingMerge.push({ name, kind: 'Provenance & signing', prNumber: res.pr.number, url: res.url });
+              }
+              if (res.action === 'Opened PR') {
+                await client.addLabels(config.owner, name, res.pr.number, ['automated-pr', 'bot', 'type/provenance', 'type/ci', 'needs-review']);
+              }
+            } catch (prErr) {
+              warn(`Could not open provenance PR for ${name}: ${prErr.message}`);
+            }
+          } else {
+            log(`    ✅ ${provResult.message}`);
+          }
+        }
+
+        // Require signed commits + provenance checks on the default branch.
+        if (repoCfg.features.provenance?.signedCommits !== false && !args.includes('--no-protect')) {
+          try {
+            const gov = await applyRepoGovernance(client, config.owner, name, repoInfo.default_branch || 'main', { hasAuthormark });
+            if (gov.applied) {
+              if (gov.changed) log(`    🔒 Required signed commits + provenance checks on \`${repoInfo.default_branch || 'main'}\``);
+              summary.provenance.governanceApplied.push({ name });
+            } else {
+              warn(`Branch protection not applied for ${name}: ${gov.reason}`);
+              summary.provenance.governanceSkipped.push({ name, reason: gov.reason, manual: gov.manual });
+            }
+          } catch (govErr) {
+            warn(`Branch protection error for ${name}: ${govErr.message}`);
+            summary.provenance.governanceSkipped.push({ name, reason: sanitize(govErr.message) });
+          }
+        }
+      }
+    }
+
     // C. Automated PR Tagging
     if (doPrTag && token) {
-      log(`  [3/4] Inspecting open pull requests for auto-tagging...`);
+      log(`  [4/5] Inspecting open pull requests for auto-tagging...`);
       try {
         const prs = await client.listPullRequests(config.owner, name, 'open');
         for (const pr of prs) {
@@ -1678,7 +2096,7 @@ or tune features.{authormark,lint}.autoFix for itself.
 
     // D. Automated Issue Tagging & Triage
     if (doIssueTag && token) {
-      log(`  [4/4] Inspecting open issues for auto-tagging & triage...`);
+      log(`  [5/5] Inspecting open issues for auto-tagging & triage...`);
       try {
         const issues = await client.listIssues(config.owner, name, 'open');
         for (const issue of issues) {
@@ -1724,6 +2142,7 @@ or tune features.{authormark,lint}.autoFix for itself.
     summary.lintFindings.length > 0 ||
     summary.awaitingMerge.length > 0 ||
     (summary.lintFixFailed && summary.lintFixFailed.length > 0) ||
+    (summary.provenance && (summary.provenance.scaffoldFailed.length > 0 || summary.provenance.governanceSkipped.length > 0)) ||
     summary.securityAlerts.length > 0 ||
     summary.failedRepos.length > 0;
 
@@ -1775,8 +2194,10 @@ function buildMarkdownReport(config, summary) {
   const am = summary.authormark;
   const awaitingMerge = summary.awaitingMerge || [];
   const lintFixFailed = summary.lintFixFailed || [];
+  const prov = summary.provenance || { scaffolded: [], scaffoldFailed: [], governanceApplied: [], governanceSkipped: [] };
   const problemsCount = am.drifted.length + am.unmarked.length + summary.lintFindings.length +
     awaitingMerge.length + lintFixFailed.length +
+    prov.scaffoldFailed.length + prov.governanceSkipped.length +
     (summary.securityAlerts ? summary.securityAlerts.length : 0) + summary.failedRepos.length;
 
   lines.push(`# Master Bot Account Dashboard (@${config.owner})`);
@@ -1836,6 +2257,37 @@ function buildMarkdownReport(config, summary) {
     lines.push(`\n</details>\n`);
   }
 
+  // Provenance, Signing & Workflow Hardening Section
+  if (prov.scaffolded.length || prov.scaffoldFailed.length || prov.governanceApplied.length || prov.governanceSkipped.length) {
+    lines.push(`## 🔐 Provenance, Signing & Workflow Hardening`);
+    if (prov.scaffolded.length) {
+      lines.push(`### 🤖 REUSE / Provenance PRs Opened / Updated`);
+      for (const r of prov.scaffolded) {
+        lines.push(`- \`${r.name}\`: [${r.action}](${r.prUrl}) — ${r.changes.join(', ')}`);
+      }
+      lines.push('');
+    }
+    if (prov.governanceApplied.length) {
+      lines.push(`### 🔒 Signed-Commit Gate Enforced`);
+      lines.push(prov.governanceApplied.map(r => `\`${r.name}\``).join(', '));
+      lines.push('');
+    }
+    if (prov.scaffoldFailed.length) {
+      lines.push(`### ❌ Provenance Scaffold Failed`);
+      for (const r of prov.scaffoldFailed) lines.push(`- \`${r.name}\`: ${r.reason}`);
+      lines.push('');
+    }
+    if (prov.governanceSkipped.length) {
+      lines.push(`### ⚠️ Branch Protection Not Applied`);
+      lines.push(`The PAT needs **Administration: Read and Write**. Apply manually:\n`);
+      for (const r of prov.governanceSkipped) {
+        lines.push(`- \`${r.name}\`: ${r.reason}`);
+        if (r.manual) lines.push(`  \`\`\`sh\n  ${r.manual}\n  \`\`\``);
+      }
+      lines.push('');
+    }
+  }
+
   // Code Lint & Hygiene Section
   lines.push(`## 🧹 Multi-Language Code Lint & Repository Hygiene`);
   if (summary.lintFixed && summary.lintFixed.length > 0) {
@@ -1869,6 +2321,9 @@ function buildMarkdownReport(config, summary) {
       if (item.workflowRisks && item.workflowRisks.length > 0) {
         lines.push(`- 🟣 **GitHub Actions Security**:`);
         for (const s of item.workflowRisks) lines.push(`  - ${s}`);
+        const provPr = prov.scaffolded.find(p => p.name === item.name);
+        if (provPr) lines.push(`  - 🤖 *Auto-fix (permissions + SHA pins) in [${provPr.action}](${provPr.prUrl})*`);
+        else lines.push(`  - *Run \`node bot.mjs --provenance --fix\` to auto-add \`permissions:\` and pin actions to a SHA.*`);
       }
       if (item.historySecrets && item.historySecrets.length > 0) {
         lines.push(`- 🔴 **Secrets in Git History**:`);
@@ -1947,5 +2402,7 @@ export {
   classifyPullRequest, classifyIssue, buildMarkdownReport, classifyBranchPr,
   auditWorkflow, scanGitHistory, pinWorkflowActions, buildDependabotConfig,
   SECRET_PATTERNS,
+  buildReuseToml, detectPublish, buildProvenanceWorkflow,
+  retargetAuthormarkPrGate, addWorkflowPermissions,
 };
 

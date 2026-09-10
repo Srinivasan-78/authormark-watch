@@ -3,7 +3,16 @@
 # Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
 # Author: https://github.com/Srinivasan-78
 # SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.edTmcyPHU753tMPmkTp7kd
+# Fingerprint: AMK1.Cl32OQazynK9z5eONir0Mp
+# Master Bot supervisor for @Srinivasan-78:
+#  - AuthorMark code watermarking & automated fix PRs
+#  - Multi-language code linting & repository hygiene
+#  - REUSE/SPDX headers, provenance workflow & signed-commit branch protection
+#    (--provenance; branch protection needs Administration:write on the PAT)
+#  - Automated PR tagging & labeling
+#  - Automated issue tagging & triage
+#  - Account-wide dashboard issue management
+# Extra flags are forwarded verbatim to bot.mjs, e.g. ./watch.sh --provenance
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

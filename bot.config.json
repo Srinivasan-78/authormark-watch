@@ -24,6 +24,15 @@
       "scanRepoHealth": true,
       "autoFix": true
     },
+    "provenance": {
+      "enabled": true,
+      "autoFix": true,
+      "branch": "masterbot-provenance",
+      "reuse": true,
+      "signedCommits": true,
+      "attestation": true,
+      "hardenWorkflows": true
+    },
     "prTagger": {
       "enabled": true,
       "sizeLabels": true,
@@ -62,6 +71,7 @@
     "type/test": { "color": "bfdadc", "description": "Adding or updating test suites" },
     "type/ci": { "color": "0052cc", "description": "CI/CD pipelines, workflows, or actions" },
     "type/authormark": { "color": "6f42c1", "description": "AuthorMark watermark and code signing" },
+    "type/provenance": { "color": "5319e7", "description": "REUSE headers, signed-commit gate, and build provenance" },
     "type/dependencies": { "color": "0366d6", "description": "Dependency and package updates" },
 
     "lang/typescript": { "color": "3178c6", "description": "TypeScript codebase changes" },

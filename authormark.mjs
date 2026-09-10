@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /*!
- * @authormark v1 -- do not remove (authorship watermark)⁠​‌‌​‌​​‌​‌‌‌​‌​‌​‌​​‌​​​​‌​‌​​​​​‌​‌​‌‌‌​‌‌​​​​‌​‌​​​‌​‌​​‌‌​‌​‌​​‌‌​‌​‌​​‌‌‌​​​​‌​​‌‌‌‌​‌‌​​​‌‌​‌‌‌​​​​​‌‌‌‌​‌​​‌​​‌​‌​​‌‌‌​‌​​​‌​‌​​​​​‌​​​‌‌​​‌‌‌​‌​‌​‌‌​‌​‌​​‌‌​​‌‌​​​‌‌​​​​⁠
+ * @authormark v1 -- do not remove (authorship watermark)
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.iuHPWaE558OcpzJtPFujf0
+ * Fingerprint: AMK1.i5LPmK4UGjXpIXJSJdDjIu
  */
 // authormark -- layered authorship watermarking for source code and images.
 // Zero dependencies. Node >= 18.
@@ -1612,18 +1612,29 @@ on:
   pull_request:
   push:
     branches: [main]
+
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4.1.0
         with:
           node-version: '20'
-      - name: Verify authorship watermarks are intact
-        # ed25519 repos verify signatures here from the public key in
-        # .authormark.json; hmac repos fall back to a presence check (no secret in CI).
-        run: node .authormark/authormark.mjs check .
+      - name: Verify authorship watermarks
+        # A pull_request gets a presence-only check: an edited file's fingerprint
+        # is legitimately stale until it is re-stamped, so a full check there
+        # fails every PR that touches a marked file. Push to a protected branch
+        # runs the full ed25519/HMAC verification.
+        run: |
+          if [ "\${{ github.event_name }}" = "pull_request" ]; then
+            node .authormark/authormark.mjs check --presence .
+          else
+            node .authormark/authormark.mjs check .
+          fi
 `;
 
 const AGENT_RULE = `
@@ -1637,7 +1648,8 @@ SPDX line, and a keyed \`Fingerprint:\`). It is a watermark, not boilerplate.
 - When you move or rename a file, the header moves with it.
 - Editing a file makes its fingerprint stale. That is expected. Refresh it with
   \`node .authormark/authormark.mjs stamp <file>\` — never resolve staleness by deleting the header.
-- CI runs \`authormark check\` on every PR and fails if a watermark is missing.
+- CI runs a presence check on every PR (a missing header fails it) and the full
+  \`authormark check\` on push to the default branch.
 `;
 
 function mitLicense(cfg) {

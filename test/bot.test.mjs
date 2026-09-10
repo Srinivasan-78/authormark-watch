@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
  * Author: https://github.com/Srinivasan-78
  * SPDX-License-Identifier: MIT
- * Fingerprint: AMK1.f_nIYmZolkQRtZsW4pXtBZ
+ * Fingerprint: AMK1.yXAqn7RdwsTQMANZkNm_1l
  */
 // Unit tests for the pure classifiers, linter and report builder in bot.mjs.
 
@@ -19,6 +19,8 @@ import {
   buildMarkdownReport, lintRepository, applyRepoOverrides,
   auditWorkflow, pinWorkflowActions, scanGitHistory,
   classifyBranchPr, buildDependabotConfig,
+  buildReuseToml, detectPublish, buildProvenanceWorkflow,
+  retargetAuthormarkPrGate, addWorkflowPermissions,
 } from '../bot.mjs';
 
 // ---------------------------------------------------------------- classifyPullRequest
@@ -314,4 +316,120 @@ test('lintRepository flags a package.json/LICENSE licence mismatch', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------- provenance: builders
+
+test('buildReuseToml carries the SPDX id and the configured copyright holder', () => {
+  const toml = buildReuseToml({ botIdentity: { author: 'Ada Lovelace', authorEmail: 'ada@example.com' } });
+  assert.match(toml, /version = 1/);
+  assert.match(toml, /path = "\*\*"/);
+  assert.match(toml, /SPDX-License-Identifier = "MIT"/);
+  assert.match(toml, /SPDX-FileCopyrightText = "\d{4} Ada Lovelace <ada@example\.com>"/);
+});
+
+test('detectPublish recognises npm, other, and none', () => {
+  const npmDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pub-npm-'));
+  const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pub-other-'));
+  const noneDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pub-none-'));
+  try {
+    fs.writeFileSync(path.join(npmDir, 'package.json'), JSON.stringify({ name: 'x', scripts: { release: 'np' } }));
+    assert.equal(detectPublish(npmDir), 'npm');
+
+    fs.mkdirSync(path.join(otherDir, '.github', 'workflows'), { recursive: true });
+    fs.writeFileSync(path.join(otherDir, '.github', 'workflows', 'release.yml'), 'name: release\n');
+    assert.equal(detectPublish(otherDir), 'other');
+
+    fs.writeFileSync(path.join(noneDir, 'README.md'), '# x\n');
+    assert.equal(detectPublish(noneDir), null);
+  } finally {
+    for (const d of [npmDir, otherDir, noneDir]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('buildProvenanceWorkflow always lints REUSE; gates authorship + attestation on inputs', () => {
+  const bare = buildProvenanceWorkflow({});
+  assert.match(bare, /pipx run reuse lint/);
+  assert.doesNotMatch(bare, /verify-authorship/);
+  assert.doesNotMatch(bare, /attest-build-provenance/);
+  // Every action reference is SHA-pinned (40 hex) where we ship a known SHA.
+  assert.match(bare, /actions\/checkout@[0-9a-f]{40}\s+# v/);
+
+  const full = buildProvenanceWorkflow({ hasAuthormark: true, publishKind: 'npm' });
+  assert.match(full, /verify-authorship:/);
+  assert.match(full, /if: github\.event_name == 'push'/);
+  assert.match(full, /mode: check\b/);
+  assert.match(full, /release:\n\s+types: \[published\]/);
+  assert.match(full, /attest:/);
+  assert.match(full, /id-token: write/);
+  assert.match(full, /subject-path: '\*\.tgz'/);
+});
+
+// ---------------------------------------------------------------- provenance: workflow rewrites
+
+test('retargetAuthormarkPrGate downgrades a PR-triggered full check to presence', () => {
+  const wf = [
+    'on:', '  pull_request:', '  push:', '    branches: [main]',
+    'jobs:', '  check:', '    steps:',
+    '      - uses: Srinivasan-78/authormark-watch@main',
+    '        with:', '          mode: check', '          path: .',
+  ].join('\n');
+  const { text, changed } = retargetAuthormarkPrGate(wf);
+  assert.equal(changed, true);
+  assert.match(text, /mode: check-presence/);
+  assert.doesNotMatch(text, /mode: check\n/);
+});
+
+test('retargetAuthormarkPrGate adds --presence to a bare CLI check in a pull_request-only workflow', () => {
+  const wf = 'on:\n  pull_request:\njobs:\n  x:\n    steps:\n      - run: node .authormark/authormark.mjs check .\n';
+  const { text, changed } = retargetAuthormarkPrGate(wf);
+  assert.equal(changed, true);
+  assert.match(text, /authormark\.mjs check --presence \./);
+});
+
+test('retargetAuthormarkPrGate does NOT blanket-downgrade a CLI check when the workflow also runs on push', () => {
+  const wf = 'on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  x:\n    steps:\n      - run: node .authormark/authormark.mjs check .\n';
+  const { text, changed } = retargetAuthormarkPrGate(wf);
+  assert.equal(changed, false);
+  assert.equal(text, wf);
+});
+
+test('retargetAuthormarkPrGate leaves a push-only, non-authormark workflow untouched', () => {
+  const wf = 'on:\n  push:\n    branches: [main]\njobs:\n  build:\n    steps:\n      - run: npm test\n';
+  const { text, changed } = retargetAuthormarkPrGate(wf);
+  assert.equal(changed, false);
+  assert.equal(text, wf);
+});
+
+test('addWorkflowPermissions inserts a least-privilege block only when none exists', () => {
+  const without = 'name: ci\non:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n';
+  const a = addWorkflowPermissions(without);
+  assert.equal(a.changed, true);
+  assert.match(a.text, /permissions:\n  contents: read\n\njobs:/);
+
+  const withPerms = 'name: ci\non:\n  pull_request:\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n';
+  const b = addWorkflowPermissions(withPerms);
+  assert.equal(b.changed, false);
+  assert.equal(b.text, withPerms);
+});
+
+// ---------------------------------------------------------------- provenance: report section
+
+test('buildMarkdownReport renders the provenance section and manual gh command', () => {
+  const md = buildMarkdownReport({ owner: 'ada' }, {
+    total: 2, scannedTime: 't',
+    authormark: { clean: [], drifted: [], unmarked: [], fixed: [], fixFailed: [] },
+    lintFindings: [], lintFixed: [], prsTagged: [], issuesTagged: [], failedRepos: [],
+    provenance: {
+      scaffolded: [{ name: 'r1', prUrl: 'http://pr/1', action: 'Opened PR', changes: ['Added `REUSE.toml`'] }],
+      scaffoldFailed: [],
+      governanceApplied: [{ name: 'r1' }],
+      governanceSkipped: [{ name: 'r2', reason: 'GET ... failed (403)', manual: 'gh api -X PUT ...' }],
+    },
+  });
+  assert.match(md, /Provenance, Signing & Workflow Hardening/);
+  assert.match(md, /\[Opened PR\]\(http:\/\/pr\/1\)/);
+  assert.match(md, /Signed-Commit Gate Enforced/);
+  assert.match(md, /Administration: Read and Write/);
+  assert.match(md, /gh api -X PUT/);
 });
