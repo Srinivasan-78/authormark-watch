@@ -3,8 +3,7 @@
   "repos": {
     "exclude": [
       "wix-installer-template",
-      "ubisoft-game-notes",
-      "repo2graph"
+      "ubisoft-game-notes"  
     ],
     "skip": [
       "authormark-watch"
