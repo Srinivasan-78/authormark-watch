@@ -22,6 +22,7 @@ import { STANDARD_LABELS, detectStack, auditRepository } from './lib/auditor.mjs
 import { generateRepoPatches } from './lib/templates.mjs';
 import { transformRepository } from './lib/transformer.mjs';
 import { createWebhookServer, verifyGitHubSignature } from './lib/webhook.mjs';
+import { evaluateDependabotPr, processDependabotPrs } from './lib/dependabot.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -102,6 +103,7 @@ Options:
   --public-only      Only target public repositories
   --audit            Run 15-category DevSecOps/Quality/Governance audit
   --transform        Open/update PRs with missing CI, security, and governance files
+  --dependabot       Rebase dirty Dependabot PRs and merge when all CI checks pass
   --ai               Enable Gemini API architecture/QA insights (requires GEMINI_API_KEY)
   --write-reports    Write central reports to ./reports/PORTFOLIO_REPORT.md
   --snapshot <path>  Read/write previous JSON snapshot locally for change tracking
@@ -132,6 +134,7 @@ async function main() {
   const asJson = args.includes('--json');
   const doTransform = args.includes('--transform') || process.env.TRANSFORM === '1';
   const doAudit = doTransform || args.includes('--audit') || process.env.AUDIT === '1';
+  const doDependabot = args.includes('--dependabot') || process.env.DEPENDABOT_AUTOMERGE === '1';
   const useAi = args.includes('--ai') || process.env.USE_AI === '1';
   const writeReports = args.includes('--write-reports') || process.env.WRITE_REPORTS === '1';
   const publicOnly = args.includes('--public-only') || process.env.PUBLIC_ONLY === '1';
@@ -184,6 +187,27 @@ async function main() {
     const n = r.name.toLowerCase();
     return !excludeSet.has(n) && (config.repos.includeArchived || !r.archived) && (config.repos.includeForks || !r.fork) && (!publicOnly || !r.private);
   });
+
+  if (doDependabot) {
+    const depResults = await processDependabotPrs({
+      owner: config.owner,
+      repos: filtered,
+      client,
+      dryRun: isDryRun,
+      useAi,
+      mergeMethod: flagVal(args, '--merge-method') || 'squash',
+    });
+    if (asJson) {
+      process.stdout.write(JSON.stringify(depResults, null, 2) + '\n');
+    } else if (depResults.length === 0) {
+      log(`No open Dependabot PRs found across ${filtered.length} repo(s).`);
+    } else {
+      const lines = ['# Dependabot PR Automation Summary', '', '| Repository | PR | Title | Status | Reason |', '|---|---|---|---|---|'];
+      for (const d of depResults) lines.push(`| \`${d.repo}\` | [#${d.number}](${d.url}) | ${d.title} | ${d.status} | ${d.reason} |`);
+      log(lines.join('\n'));
+    }
+    return;
+  }
 
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-watch-'));
   const summary = {
@@ -352,4 +376,5 @@ export {
   STANDARD_LABELS, detectStack, auditRepository,
   generateRepoPatches, transformRepository,
   createWebhookServer, verifyGitHubSignature,
+  evaluateDependabotPr, processDependabotPrs,
 };

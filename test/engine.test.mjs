@@ -15,6 +15,7 @@ import {
   createWebhookServer,
   buildPortfolioAuditReport,
   writePortfolioReports,
+  processDependabotPrs,
 } from '../bot.mjs';
 import { analyzeWithGemini } from '../lib/ai.mjs';
 
@@ -180,3 +181,44 @@ test('verifyGitHubSignature and createWebhookServer validate HMAC-SHA256 signatu
     await new Promise(resolve => server.close(resolve));
   }
 });
+
+test('processDependabotPrs merges passing PRs, rebases dirty PRs, and blocks failing CI PRs', async () => {
+  const merged = [];
+  const comments = [];
+  const mockClient = {
+    token: 'tok',
+    listOpenPullRequests: async () => [
+      { number: 1, title: 'bump a', html_url: 'https://x/1', user: { login: 'dependabot[bot]' }, head: { sha: 's1' } },
+      { number: 2, title: 'bump b', html_url: 'https://x/2', user: { login: 'dependabot[bot]' }, head: { sha: 's2' } },
+      { number: 3, title: 'bump c', html_url: 'https://x/3', user: { login: 'dependabot[bot]' }, head: { sha: 's3' } },
+      { number: 4, title: 'human pr', html_url: 'https://x/4', user: { login: 'Srinivasan-78' }, head: { sha: 's4' } },
+    ],
+    getPullRequest: async (_o, _r, num) => ({
+      head: { sha: `s${num}` },
+      mergeable: num !== 2,
+      mergeable_state: num === 1 ? 'clean' : num === 2 ? 'dirty' : 'clean',
+    }),
+    getCommitCheckRuns: async (_o, _r, sha) => ({
+      check_runs: sha === 's3'
+        ? [{ name: 'test', status: 'completed', conclusion: 'failure', html_url: 'https://x/run/3' }]
+        : [{ name: 'test', status: 'completed', conclusion: 'success', html_url: 'https://x/run/1' }],
+    }),
+    mergePullRequest: async (_o, _r, num) => { merged.push(num); },
+    addComment: async (_o, _r, num, body) => { comments.push({ num, body }); },
+  };
+
+  const results = await processDependabotPrs({
+    owner: 'Srinivasan-78',
+    repos: [{ name: 'demo', language: 'JavaScript' }],
+    client: mockClient,
+    dryRun: false,
+  });
+
+  assert.equal(results.length, 3);
+  assert.deepEqual(merged, [1]);
+  assert.deepEqual(comments, [{ num: 2, body: '@dependabot rebase' }]);
+  assert.equal(results.find(r => r.number === 1).status, 'merged');
+  assert.equal(results.find(r => r.number === 2).status, 'rebased');
+  assert.equal(results.find(r => r.number === 3).status, 'failed');
+});
+

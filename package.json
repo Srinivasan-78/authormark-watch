@@ -14,6 +14,7 @@
     "watch": "node bot.mjs",
     "audit": "node bot.mjs --audit --dry-run",
     "transform": "node bot.mjs --transform",
+    "dependabot": "node bot.mjs --dependabot",
     "webhook": "node bot.mjs webhook",
     "bot": "node bot.mjs"
   },
