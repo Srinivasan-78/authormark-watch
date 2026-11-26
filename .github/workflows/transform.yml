@@ -1,0 +1,55 @@
+name: Portfolio Audit & Transform
+
+on:
+  schedule:
+    - cron: '29 5 * * 0'
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Specific repository to audit/transform (leave blank for all)'
+        type: string
+        default: ''
+      apply_prs:
+        description: 'Open/update PRs on target repos (false = dry-run audit)'
+        type: boolean
+        default: false
+      use_ai:
+        description: 'Include Gemini AI recommendations (requires GEMINI_API_KEY secret)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: portfolio-transform
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  transform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Run portfolio audit / transform
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          WATCH_TOKEN: ${{ secrets.WATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.BOT_TOKEN || secrets.WATCH_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          TRANSFORM: ${{ inputs.apply_prs && '1' || '0' }}
+          USE_AI: ${{ inputs.use_ai && '1' || '0' }}
+        run: |
+          FLAGS=(--audit --write-reports)
+          [ "$TRANSFORM" = "1" ] && FLAGS+=(--transform) || FLAGS+=(--dry-run)
+          [ "$USE_AI" = "1" ] && FLAGS+=(--ai)
+          [ -n "$TARGET_REPO" ] && FLAGS+=(--repo "$TARGET_REPO")
+          node bot.mjs "${FLAGS[@]}"
