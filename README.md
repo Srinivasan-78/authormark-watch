@@ -1,29 +1,39 @@
 # authormark-watch
 
-Lightweight, read-only GitHub account monitor (`Node >= 18`, zero npm dependencies). Tracks repository state across `@Srinivasan-78`, runs vulnerability and secret checks, and maintains a single status dashboard.
+[![CI](https://github.com/Srinivasan-78/authormark-watch/actions/workflows/ci.yml/badge.svg)](https://github.com/Srinivasan-78/authormark-watch/actions/workflows/ci.yml)
 
-## What It Checks
+Zero-dependency GitHub account monitor, DevSecOps auditor, and automated PR transformer (`Node >= 18`, zero npm dependencies). Tracks repository state across `@Srinivasan-78`, runs vulnerability and secret checks, audits all repos against a 15-category engineering scorecard, and opens/updates Pull Requests with missing CI, CodeQL, Dependabot, secret-scanning, and governance baselines.
 
-- **Dependency Vulnerabilities (`lib/vulns.mjs`)**: Statically parses `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, exact `package.json` pins, `requirements*.txt`, `poetry.lock`, `uv.lock`, `go.mod`, and `Cargo.lock` without executing untrusted repo code, then queries `api.osv.dev/v1/querybatch` for CVEs/advisories.
-- **GitHub Security Alerts & Posture (`lib/github.mjs`)**: Collects open Dependabot, code-scanning, and secret-scanning alerts, open PR / Dependabot PR counts, and default-branch protection status.
+## What It Checks & Automates
+
+- **Dependency Vulnerabilities (`lib/vulns.mjs`)**: Statically parses `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, exact `package.json` pins, `requirements*.txt`, `poetry.lock`, `uv.lock`, `go.mod`, and `Cargo.lock`, then queries `api.osv.dev/v1/querybatch` for CVEs/advisories.
+- **GitHub Security Alerts & Posture (`lib/github.mjs`)**: Collects open Dependabot, code-scanning, and secret-scanning alerts, open PR counts, and default-branch protection status.
 - **Secrets & Git History (`lib/scanner.mjs`)**: Scans tracked files, `.env*` files, and `git log` history for leaked tokens, API keys, webhooks, JWTs, and PEM private keys.
 - **GitHub Actions Security (`lib/scanner.mjs`)**: Audits workflows for `pull_request_target` + head checkout, unpinned action refs, missing/`write-all` `permissions:`, `${{ github.event.* }}` script injection in `run:`, and `curl | sh`.
-- **Change Tracking & Repo Inventory (`lib/report.mjs`)**: Tracks commit/CVE/alert deltas between runs (embedded in the dashboard issue or via `--snapshot`), plus visibility, language, push date / staleness, `HEAD` commit, file count, dependency count, CVE count, PRs, and protection status.
+- **15-Category Engineering Auditor (`lib/auditor.mjs`)**: Evaluates Architecture, Code Quality, CI/CD, CodeQL, SAST, Secret Scanning, Dependency Security, Supply Chain Security, Testing, Test Coverage, Performance, Documentation, Repository Governance, Release Engineering, and Maintainability.
+- **Stack-Aware PR Transformer (`lib/templates.mjs`, `lib/transformer.mjs`)**: Non-destructively generates missing workflows (with SHA-pinned actions), grouped `dependabot.yml`, `SECURITY.md`, `CODEOWNERS`, issue/PR templates, syncs standard labels, and opens/updates PRs.
+- **Optional Gemini AI Insights (`lib/ai.mjs`)**: When `--ai` and `GEMINI_API_KEY` are set, adds repo-specific architecture and QA recommendations.
+- **Webhook Listener (`lib/webhook.mjs`)**: HMAC-SHA256 verified GitHub webhook server (`node bot.mjs webhook`).
+- **Central Portfolio Reports (`lib/report.mjs`)**: Writes `reports/PORTFOLIO_REPORT.md` and per-repo reports alongside dashboard issue tracking.
 
 ## Usage
 
 ```sh
 node bot.mjs                               # Scan all owned repos, update dashboard issue
-node bot.mjs --dry-run                     # Scan and print report without updating issues/webhooks
-node bot.mjs --snapshot .watch-snapshot.json
-node bot.mjs --json                        # Print structured JSON report
+node bot.mjs --audit --dry-run             # Run 15-category DevSecOps audit (dry-run)
+node bot.mjs --audit --write-reports       # Audit and write central ./reports/ markdown files
+node bot.mjs --transform --dry-run         # Preview PR patches without pushing
+node bot.mjs --transform                   # Open/update PRs & sync labels on target repos
+node bot.mjs --transform --ai              # Include Gemini API recommendations in PRs
 node bot.mjs --repo my-repo                # Target one repository
-node bot.mjs --no-osv                      # Skip live OSV CVE lookup
+node bot.mjs webhook                       # Start GitHub webhook server on :8787
 ```
 
 Environment variables:
-- `BOT_TOKEN` / `WATCH_TOKEN` / `GH_TOKEN`: GitHub PAT to list private+public repos, clone, and read security alerts / branch protection (falls back to `gh auth token`, or local sibling repos when run offline).
-- `ISSUE_TOKEN`: Token used to update `watch: Security & Repo Monitor Dashboard` in `authormark-watch` (`REPORT=0` skips updating the issue).
+- `BOT_TOKEN` / `WATCH_TOKEN` / `GH_TOKEN`: GitHub PAT (`repo` + `workflow` scopes for PR automation; falls back to `gh auth token`).
+- `ISSUE_TOKEN`: Token used to update `watch: Security & Repo Monitor Dashboard` in `authormark-watch`.
+- `GEMINI_API_KEY`: Optional Gemini API key for `--ai` insights.
+- `WEBHOOK_SECRET` / `WEBHOOK_PORT`: Secret and port for `node bot.mjs webhook`.
 - `SLACK_WEBHOOK` / `DISCORD_WEBHOOK`: Optional alerts when findings exist.
 
 ## Configuration

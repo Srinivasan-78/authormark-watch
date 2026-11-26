@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   log, warn, errLog, sanitize, resolveToken, resolveIssueToken,
-  cloneShallow, notify, GitHubClient,
+  cloneShallow, cloneForPr, notify, GitHubClient,
 } from './lib/github.mjs';
 import {
   walkFiles, auditWorkflow, scanGitHistory, scanRepository, SECRET_PATTERNS,
@@ -16,7 +16,13 @@ import {
 import { parseDependencies, queryOsvVulnerabilities } from './lib/vulns.mjs';
 import {
   buildSnapshot, extractSnapshotFromText, diffSnapshots, buildMarkdownReport,
+  buildPortfolioAuditReport, writePortfolioReports,
 } from './lib/report.mjs';
+import { STANDARD_LABELS, detectStack, auditRepository } from './lib/auditor.mjs';
+import { generateRepoPatches } from './lib/templates.mjs';
+import { transformRepository } from './lib/transformer.mjs';
+import { createWebhookServer, verifyGitHubSignature } from './lib/webhook.mjs';
+import { evaluateDependabotPr, processDependabotPrs } from './lib/dependabot.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -86,28 +92,52 @@ function flagVal(args, name) {
   return v && !v.startsWith('-') ? v : null;
 }
 
-const HELP = `authormark-watch -- cross-repo vulnerability scanner & code monitor
+const HELP = `authormark-watch -- cross-repo vulnerability scanner, auditor & DevSecOps transformer
 
 Usage:
   node bot.mjs [options]
+  node bot.mjs webhook
 
 Options:
   --repo <name>      Target a single repository
+  --public-only      Only target public repositories
+  --audit            Run 15-category DevSecOps/Quality/Governance audit
+  --transform        Open/update PRs with missing CI, security, and governance files
+  --dependabot       Rebase dirty Dependabot PRs and merge when all CI checks pass
+  --ai               Enable Gemini API architecture/QA insights (requires GEMINI_API_KEY)
+  --write-reports    Write central reports to ./reports/PORTFOLIO_REPORT.md
   --snapshot <path>  Read/write previous JSON snapshot locally for change tracking
   --json             Print full JSON snapshot instead of Markdown report
   --no-osv           Skip live OSV vulnerability API queries
-  --dry-run          Run checks without updating GitHub issue, snapshot file, or webhooks
+  --dry-run          Run checks/transforms without pushing branches, PRs, issues, or webhooks
   --help             Show this help message`;
 
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes('--help') || args.includes('-h')) { log(HELP); process.exit(0); }
 
+  if (args[0] === 'webhook') {
+    const port = Number(process.env.WEBHOOK_PORT || process.env.PORT || 8787);
+    const server = createWebhookServer({
+      onRepoEvent: async ({ repo }) => {
+        log(`Triggering audit for ${repo} via webhook...`);
+      },
+    });
+    server.listen(port, () => log(`authormark-watch webhook listening on :${port}`));
+    return;
+  }
+
   const config = loadConfig();
   const token = resolveToken();
   const issueToken = resolveIssueToken();
   const isDryRun = args.includes('--dry-run');
   const asJson = args.includes('--json');
+  const doTransform = args.includes('--transform') || process.env.TRANSFORM === '1';
+  const doAudit = doTransform || args.includes('--audit') || process.env.AUDIT === '1';
+  const doDependabot = args.includes('--dependabot') || process.env.DEPENDABOT_AUTOMERGE === '1';
+  const useAi = args.includes('--ai') || process.env.USE_AI === '1';
+  const writeReports = args.includes('--write-reports') || process.env.WRITE_REPORTS === '1';
+  const publicOnly = args.includes('--public-only') || process.env.PUBLIC_ONLY === '1';
   const skipOsv = args.includes('--no-osv') || process.env.SKIP_OSV === '1';
   const targetRepo = flagVal(args, '--repo') || process.env.TARGET_REPO || null;
   const snapshotPath = flagVal(args, '--snapshot') || process.env.SNAPSHOT_PATH || null;
@@ -155,8 +185,29 @@ async function main() {
   const excludeSet = new Set([...(config.repos.exclude || []), ...(config.repos.skip || [])].map(r => r.toLowerCase()));
   const filtered = repos.filter(r => {
     const n = r.name.toLowerCase();
-    return !excludeSet.has(n) && (config.repos.includeArchived || !r.archived) && (config.repos.includeForks || !r.fork);
+    return !excludeSet.has(n) && (config.repos.includeArchived || !r.archived) && (config.repos.includeForks || !r.fork) && (!publicOnly || !r.private);
   });
+
+  if (doDependabot) {
+    const depResults = await processDependabotPrs({
+      owner: config.owner,
+      repos: filtered,
+      client,
+      dryRun: isDryRun,
+      useAi,
+      mergeMethod: flagVal(args, '--merge-method') || 'squash',
+    });
+    if (asJson) {
+      process.stdout.write(JSON.stringify(depResults, null, 2) + '\n');
+    } else if (depResults.length === 0) {
+      log(`No open Dependabot PRs found across ${filtered.length} repo(s).`);
+    } else {
+      const lines = ['# Dependabot PR Automation Summary', '', '| Repository | PR | Title | Status | Reason |', '|---|---|---|---|---|'];
+      for (const d of depResults) lines.push(`| \`${d.repo}\` | [#${d.number}](${d.url}) | ${d.title} | ${d.status} | ${d.reason} |`);
+      log(lines.join('\n'));
+    }
+    return;
+  }
 
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-watch-'));
   const summary = {
@@ -166,6 +217,7 @@ async function main() {
     repos: [],
     failedRepos: [],
     changes: [],
+    transformResults: [],
     totals: { vulns: 0, secrets: 0, historySecrets: 0, workflowRisks: 0, integrity: 0, githubAlerts: 0 },
   };
 
@@ -174,8 +226,10 @@ async function main() {
       const name = repoInfo.name;
       let repoDir = path.join(workDir, name);
       if (token) {
-        try { cloneShallow(config.owner, name, repoDir, token); }
-        catch (err) {
+        try {
+          if (doTransform && !isDryRun) cloneForPr(config.owner, name, repoDir, token);
+          else cloneShallow(config.owner, name, repoDir, token);
+        } catch (err) {
           warn(`Could not clone ${name}: ${sanitize(err.message)}`);
           summary.failedRepos.push({ name, reason: 'Clone failed or repository inaccessible' });
           continue;
@@ -219,7 +273,7 @@ async function main() {
       const cveCount = osv.findings.reduce((n, f) => n + f.vulns.length, 0);
       const githubAlertsCount = githubAlerts.dependabot + githubAlerts.codeScanning + githubAlerts.secretScanning;
 
-      summary.repos.push({
+      const repoSummary = {
         name,
         metadata,
         posture,
@@ -231,7 +285,23 @@ async function main() {
         githubAlertsCount,
         vulnerabilityAlertsDisabled: githubAlerts.vulnerabilityAlertsDisabled,
         findings,
-      });
+      };
+      summary.repos.push(repoSummary);
+
+      if (doAudit) {
+        const tRes = await transformRepository({
+          owner: repoCfg.owner,
+          repoDir,
+          repoMeta: repoInfo,
+          scanResult: repoSummary,
+          posture,
+          client,
+          token,
+          dryRun: isDryRun || !doTransform,
+          useAi,
+        });
+        summary.transformResults.push(tRes);
+      }
 
       summary.totals.vulns += cveCount;
       summary.totals.secrets += findings.secrets.length;
@@ -251,7 +321,13 @@ async function main() {
     try { fs.writeFileSync(snapshotPath, JSON.stringify(summary.snapshot, null, 2) + '\n'); } catch {}
   }
 
-  const consoleReport = buildMarkdownReport(config, summary);
+  if (doAudit && writeReports && !isDryRun) {
+    writePortfolioReports(path.join(__dirname, 'reports'), config.owner, summary.scannedTime, summary.transformResults);
+  }
+
+  const consoleReport = doAudit
+    ? buildPortfolioAuditReport(config.owner, summary.scannedTime, summary.transformResults)
+    : buildMarkdownReport(config, summary);
   if (asJson) process.stdout.write(JSON.stringify(summary, null, 2) + '\n');
   else console.log(consoleReport);
 
@@ -296,4 +372,9 @@ export {
   scanRepository, walkFiles, auditWorkflow, scanGitHistory, SECRET_PATTERNS,
   parseDependencies, queryOsvVulnerabilities,
   buildSnapshot, extractSnapshotFromText, diffSnapshots, buildMarkdownReport,
+  buildPortfolioAuditReport, writePortfolioReports,
+  STANDARD_LABELS, detectStack, auditRepository,
+  generateRepoPatches, transformRepository,
+  createWebhookServer, verifyGitHubSignature,
+  evaluateDependabotPr, processDependabotPrs,
 };
