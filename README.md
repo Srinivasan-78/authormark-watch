@@ -1,7 +1,6 @@
 # authormark-watch
 
 [![CI](https://github.com/Srinivasan-78/authormark-watch/actions/workflows/ci.yml/badge.svg)](https://github.com/Srinivasan-78/authormark-watch/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/Srinivasan-78/authormark-watch/actions/workflows/codeql.yml/badge.svg)](https://github.com/Srinivasan-78/authormark-watch/actions/workflows/codeql.yml)
 
 Zero-dependency GitHub account monitor, DevSecOps auditor, and automated PR transformer (`Node >= 18`, zero npm dependencies). Tracks repository state across `@Srinivasan-78`, runs vulnerability and secret checks, audits all repos against a 15-category engineering scorecard, and opens/updates Pull Requests with missing CI, CodeQL, Dependabot, secret-scanning, and governance baselines.
 
