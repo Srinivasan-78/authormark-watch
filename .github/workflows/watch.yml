@@ -2,8 +2,8 @@ name: Security & Repo Watch
 
 on:
   schedule:
-    # Daily at 06:17 UTC.
-    - cron: '17 6 * * *'
+    # Twice weekly on Monday and Thursday at 06:17 UTC.
+    - cron: '17 6 * * 1,4'
   workflow_dispatch:
     inputs:
       target_repo:
