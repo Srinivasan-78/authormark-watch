@@ -1,56 +1,33 @@
-# @authormark v1 -- do not remove (authorship watermark)
-# Copyright (c) 2026 Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com>
-# Author: https://github.com/Srinivasan-78
-# SPDX-License-Identifier: MIT
-# Fingerprint: AMK1.G5Z-fYigir0TxA40EUyNXZ
-name: Master Bot Supervisor
+name: Security & Repo Watch
 
 on:
   schedule:
-    # Weekly on Monday at 06:17 UTC. Off-the-hour so it isn't queued behind everyone else's cron.
-    - cron: '17 6 * * 1'
+    # Daily at 06:17 UTC.
+    - cron: '17 6 * * *'
   workflow_dispatch:
     inputs:
-      fix:
-        description: 'Open fix PRs on repos that are unmarked, drifted, or require hygiene fixes'
-        type: boolean
-        default: true
-      tag_prs:
-        description: 'Automatically tag and label open PRs across all repos'
-        type: boolean
-        default: true
-      tag_issues:
-        description: 'Automatically triage and tag open issues across all repos'
-        type: boolean
-        default: true
-      lint:
-        description: 'Run multi-language code linting and hygiene scan'
-        type: boolean
-        default: true
-      provenance:
-        description: 'Scaffold REUSE headers + provenance workflow, harden workflows, and (with fix) require signed commits'
-        type: boolean
-        default: true
       target_repo:
-        description: 'Specific repository to target (leave blank to supervise all repos)'
+        description: 'Specific repository to scan (leave blank for all)'
         type: string
         default: ''
+      skip_osv:
+        description: 'Skip live OSV dependency CVE lookup'
+        type: boolean
+        default: false
 
-# A manual run and the weekly cron overlapping would open duplicate fix PRs or race tags.
 concurrency:
-  group: authormark-master-bot
+  group: repo-security-watch
   cancel-in-progress: false
 
 jobs:
-  supervisor:
+  watch:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
       issues: write
-      pull-requests: write
     steps:
-      - name: Checkout Master Bot Repository
+      - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.2.2
 
       - name: Setup Node.js
@@ -58,24 +35,16 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Run Master Bot Account Supervisor
+      - name: Run cross-repo monitor
         env:
-          # A PAT with repo/issues/pull-requests scope across all repos.
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           WATCH_TOKEN: ${{ secrets.WATCH_TOKEN }}
           GH_TOKEN: ${{ secrets.BOT_TOKEN || secrets.WATCH_TOKEN }}
-          # The status dashboard issue is filed in this repo using GITHUB_TOKEN.
           ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # HMAC key for AuthorMark code signing / stamping in FIX mode.
-          AUTHORMARK_KEY: ${{ secrets.AUTHORMARK_KEY }}
-          FIX: ${{ inputs.fix == false && '0' || '1' }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          SKIP_OSV: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_osv && '1' || '0' }}
         run: |
           chmod +x ./watch.sh
-          FLAGS=(--all --fix)
-          [ "${{ inputs.fix || 'true' }}" = "false" ] && FLAGS=(--all)
-          [ "${{ inputs.lint || 'true' }}" = "true" ] && FLAGS+=(--lint)
-          [ "${{ inputs.provenance || 'true' }}" = "true" ] && FLAGS+=(--provenance)
-          [ "${{ inputs.tag_prs || 'true' }}" = "true" ] && FLAGS+=(--tag-prs)
-          [ "${{ inputs.tag_issues || 'true' }}" = "true" ] && FLAGS+=(--tag-issues)
-          [ -n "${{ inputs.target_repo }}" ] && FLAGS+=(--repo "${{ inputs.target_repo }}")
+          FLAGS=()
+          [ -n "$TARGET_REPO" ] && FLAGS+=(--repo "$TARGET_REPO")
           ./watch.sh "${FLAGS[@]}"

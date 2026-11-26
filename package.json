@@ -1,37 +1,34 @@
 {
   "name": "authormark-watch",
-  "version": "1.0.0",
-  "description": "Master Bot & account-wide repository supervisor: layered authorship watermarking, code signing, multi-language hygiene, and PR/issue triage.",
+  "version": "2.0.0",
+  "description": "Zero-dependency cross-repo vulnerability scanner, security monitor, and repository tracker.",
   "type": "module",
   "bin": {
-    "authormark": "authormark.mjs",
+    "authormark-watch": "bot.mjs",
     "authormark-bot": "bot.mjs"
   },
   "scripts": {
     "test": "node --test",
     "test:watch": "node --test --watch",
-    "authormark": "node authormark.mjs",
+    "watch": "node bot.mjs",
     "bot": "node bot.mjs"
   },
   "engines": {
     "node": ">=18"
   },
   "files": [
-    "authormark.mjs",
     "bot.mjs",
+    "lib/",
     "watch.sh",
-    "bot.config.json",
-    "action.yml"
+    "bot.config.json"
   ],
   "keywords": [
-    "watermark",
-    "authorship",
-    "provenance",
-    "code-signing",
-    "steganography",
-    "github-bot",
-    "supply-chain",
-    "slsa"
+    "security",
+    "vulnerability-scanner",
+    "osv",
+    "secret-scanning",
+    "github-actions",
+    "repo-monitor"
   ],
   "author": "Srinivasan Vijayaraghavan <srinivasan.shyam2000@gmail.com> (https://github.com/Srinivasan-78)",
   "license": "MIT",
