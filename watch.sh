@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -8,4 +8,4 @@ if [ -n "${CI:-}" ] && [ -z "${GH_TOKEN:-}" ] && [ -z "${BOT_TOKEN:-}" ] && [ -z
   exit 1
 fi
 
-exec node "$DIR/bot.mjs" "$@"
+exec cargo run --release --manifest-path "$DIR/Cargo.toml" -- "$@"

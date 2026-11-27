@@ -1,0 +1,24 @@
+[package]
+name = "authormark-watch"
+version = "3.0.0"
+edition = "2021"
+description = "Zero-runtime-dependency Rust cross-repo vulnerability scanner, DevSecOps auditor, and PR transformer."
+license = "MIT"
+repository = "https://github.com/Srinivasan-78/authormark-watch"
+
+[[bin]]
+name = "authormark-watch"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", features = ["clock"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+hex = "0.4"
+hmac = "0.12"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.14"
+walkdir = "2.5"

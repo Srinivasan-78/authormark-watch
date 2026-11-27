@@ -28,12 +28,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
-        with:
-          node-version: '24'
-
+      - name: Build release binary
+        run: cargo build --release
       - name: Process Dependabot PRs
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -46,4 +42,4 @@ jobs:
           FLAGS=(--dependabot --public-only)
           [ "$DRY_RUN" = "1" ] && FLAGS+=(--dry-run)
           [ -n "$TARGET_REPO" ] && FLAGS+=(--repo "$TARGET_REPO")
-          node bot.mjs "${FLAGS[@]}"
+          ./target/release/authormark-watch "${FLAGS[@]}"

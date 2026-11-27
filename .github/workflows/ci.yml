@@ -9,18 +9,16 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      matrix:
-        node: ['18', '20', '24']
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
-        with:
-          node-version: ${{ matrix.node }}
-      - name: Run tests with coverage
-        run: node --test --experimental-test-coverage
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test
       - name: CLI smoke check
-        run: node bot.mjs --help >/dev/null
+        run: cargo run -- --help >/dev/null
