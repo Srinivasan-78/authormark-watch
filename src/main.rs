@@ -416,12 +416,6 @@ fn main() {
             });
     }
 
-    let slack = config
-        .notify
-        .slack
-        .as_deref()
-        .or_else(|| env::var("SLACK_WEBHOOK").ok().as_deref().map(|_| ""));
-    let _ = slack;
     let slack_url = config
         .notify
         .slack
