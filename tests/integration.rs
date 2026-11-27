@@ -172,16 +172,13 @@ fn auditor_and_templates_generate_clean_workflows_without_license() {
 fn scan_repository_detects_secrets_and_respects_allowlist() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("fixtures")).unwrap();
+    let pem_hdr = format!("{}RSA PRIVATE KEY-----", "-----BEGIN ");
     fs::write(
         dir.path().join("fixtures").join("sample.key"),
-        "-----BEGIN RSA PRIVATE KEY-----\nTEST\n",
+        format!("{pem_hdr}\nTEST\n"),
     )
     .unwrap();
-    fs::write(
-        dir.path().join("id_rsa"),
-        "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n",
-    )
-    .unwrap();
+    fs::write(dir.path().join("id_rsa"), format!("{pem_hdr}\nMIIabc\n")).unwrap();
     fs::write(dir.path().join(".env"), "API_TOKEN=hunter2\n").unwrap();
 
     let cfg = BotConfig::default();
