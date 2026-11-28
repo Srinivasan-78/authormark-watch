@@ -49,3 +49,10 @@ jobs:
           [ "$USE_AI" = "1" ] && FLAGS+=(--ai)
           [ -n "$TARGET_REPO" ] && FLAGS+=(--repo "$TARGET_REPO")
           ./target/release/authormark-watch "${FLAGS[@]}"
+      - name: Upload generated reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: portfolio-reports
+          path: reports/
+          if-no-files-found: ignore

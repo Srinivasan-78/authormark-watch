@@ -49,7 +49,8 @@ pub fn analyze_with_gemini(
     );
 
     let model = env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".into());
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}");
+    let url =
+        format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
     let Ok(client) = Client::builder().timeout(Duration::from_secs(20)).build() else {
         return AiResult {
             status: "error".into(),
@@ -60,7 +61,12 @@ pub fn analyze_with_gemini(
         "contents": [{ "role": "user", "parts": [{ "text": prompt }] }],
         "generationConfig": { "temperature": 0.2, "maxOutputTokens": 512 }
     });
-    let Ok(res) = client.post(url).json(&payload).send() else {
+    let Ok(res) = client
+        .post(url)
+        .header("x-goog-api-key", &api_key)
+        .json(&payload)
+        .send()
+    else {
         return AiResult {
             status: "error".into(),
             insights: None,
